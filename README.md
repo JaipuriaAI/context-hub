@@ -70,6 +70,69 @@ Runs entirely on Cloudflare's free tier with massive headroom:
 
 ---
 
+## How Is This Different?
+
+There are many MCP memory servers. Here's why Context Hub exists and how it compares:
+
+### The Core Difference
+
+**Every other memory MCP server is local-only.** They run on your machine via stdio. Your phone can't reach them. Your browser can't reach them. Context Hub runs in the cloud (Cloudflare Workers) so all your Claude interfaces — phone, browser, terminal — connect to the same data.
+
+### Comparison Table
+
+| Feature | Context Hub | Anthropic server-memory | mcp-memory-keeper | Basic Memory | OpenMemory (Mem0) | mem0-mcp-selfhosted |
+|---------|:-----------:|:-----------------------:|:-----------------:|:------------:|:-----------------:|:-------------------:|
+| **Works with Claude.ai (browser)** | Yes | No | No | Yes (cloud plan) | No | No |
+| **Works with Claude App (phone)** | Yes | No | No | No | No | No |
+| **Works with Claude Code** | Yes | Yes | Yes | Yes | Yes | Yes |
+| **Cloud-hosted (accessible anywhere)** | Yes | No (local JSON) | No (local SQLite) | Optional (paid) | No (local Docker) | No (local Docker) |
+| **Free forever** | Yes ($0) | Yes | Yes | Free local / Paid cloud | Yes (self-host) | Yes (self-host) |
+| **Setup time** | ~10 min | ~2 min | ~2 min | ~5 min | ~30 min | ~15 min |
+| **Infrastructure required** | None (Cloudflare free) | None | None | None (local) | Docker + Qdrant + Ollama | Docker + Qdrant + Ollama + Neo4j |
+| **Full-text search** | Yes (FTS5) | Keyword only | Yes | Yes | Semantic (vectors) | Semantic (vectors) |
+| **Decision tracking (with reasoning)** | Yes | No | No | No | No | No |
+| **Project management** | Yes (full CRUD) | No | Channels only | Projects | No | No |
+| **Custom instructions sync** | Yes | No | No | No | No | No |
+| **Identity profile** | Yes | No | No | No | No | No |
+| **Cross-interface context log** | Yes | No | No | No | No | No |
+| **Export/import** | Yes (JSON) | No | Yes (JSON) | Yes (Markdown) | No | No |
+| **Deduplication** | 3-layer auto-dedup | No | No | No | Semantic dedup | Semantic dedup |
+| **Analytics dashboard** | Yes | No | No | No | No | No |
+| **Number of tools** | 24 | 6 | ~15 | ~8 | 4-6 | 11 |
+| **Storage** | Cloudflare D1 (5GB free) | JSON file | Local SQLite | Markdown files | Qdrant + PostgreSQL | Qdrant + SQLite |
+| **Data ownership** | Your Cloudflare account | Your machine | Your machine | Your machine | Your machine | Your machine |
+
+### Why Not Just Use...
+
+**"...Anthropic's official server-memory?"**
+It stores a JSON file on your local machine. Great for Claude Desktop, but Claude.ai and your phone can't access it. No search beyond basic keyword matching. No projects, instructions, or identity management.
+
+**"...mcp-memory-keeper?"**
+Excellent for Claude Code session persistence (channels, checkpoints, git integration). But it's local-only — stdio transport, no HTTP endpoint. Claude.ai and your phone can't reach it. It solves a different problem: context within one tool vs. context across all tools.
+
+**"...Basic Memory?"**
+Good local-first knowledge management with Markdown files and a semantic graph. The cloud version requires a paid plan. It doesn't track decisions, instructions, or identity. No cross-interface context logging.
+
+**"...OpenMemory / Mem0?"**
+Powerful semantic search with vector embeddings. But requires Docker + Qdrant + Ollama running on your machine (~500MB download, 30 min setup). Local-only — no cloud access for your phone. Overkill infrastructure for personal context management. No decision tracking, no project management, no instructions sync.
+
+**"...mem0-mcp-selfhosted?"**
+Same as Mem0 but fully self-hosted. Requires Docker + Qdrant + Ollama + optionally Neo4j. Impressive 11 tools with knowledge graph support. But it's local stdio only, requires significant infrastructure, and solves the "semantic recall" problem rather than the "cross-interface sync" problem.
+
+### Context Hub's Unique Position
+
+Context Hub is the only tool that:
+1. **Bridges all three Claude interfaces** (browser, phone, terminal) through one server
+2. **Runs in the cloud for free** (Cloudflare Workers free tier, no Docker, no containers)
+3. **Tracks decisions with reasoning** (not just what, but why)
+4. **Syncs custom instructions and identity** across all interfaces
+5. **Provides cross-interface breadcrumbs** ("what was I discussing on my phone?")
+6. **Setup takes 10 minutes** with zero infrastructure management
+
+If you only use Claude Code and want local-only memory, tools like mcp-memory-keeper or server-memory are simpler choices. Context Hub is for people who use Claude across multiple interfaces and want their context to follow them everywhere.
+
+---
+
 ## Quick Start (5 Steps, ~10 minutes)
 
 ### Prerequisites
@@ -80,7 +143,7 @@ Runs entirely on Cloudflare's free tier with massive headroom:
 ### Step 1: Clone and install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/claude-context-hub.git
+git clone https://github.com/mayankbohra/claude-context-hub.git
 cd claude-context-hub
 npm install
 ```
