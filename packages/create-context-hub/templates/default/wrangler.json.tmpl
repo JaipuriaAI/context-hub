@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "{{PROJECT_NAME}}",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-03-14",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "{{PROJECT_NAME}}-db",
+      "database_id": "{{DB_ID}}"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CONTEXT_HUB",
+        "class_name": "ContextHub"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "ContextHub"
+      ]
+    }
+  ]
+}

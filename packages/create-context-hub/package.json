@@ -1,0 +1,37 @@
+{
+  "name": "create-context-hub",
+  "version": "0.1.4",
+  "description": "Create a Claude Context Hub — your personal AI context layer across Claude interfaces. One command to scaffold, deploy, and connect.",
+  "type": "module",
+  "bin": "./dist/cli.js",
+  "files": [
+    "dist/",
+    "templates/"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "create",
+    "claude",
+    "mcp",
+    "context-hub",
+    "cloudflare-workers",
+    "ai-context",
+    "model-context-protocol"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@clack/prompts": "^0.9.1",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

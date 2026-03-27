@@ -133,7 +133,17 @@ If you only use Claude Code and want local-only memory, tools like mcp-memory-ke
 
 ---
 
-## Quick Start (5 Steps, ~10 minutes)
+## Quick Start
+
+### Option A: One Command (Recommended)
+
+```bash
+npx create-context-hub
+```
+
+That's it. The CLI walks you through everything interactively — scaffolds the project, logs into Cloudflare, creates the D1 database, runs migrations, deploys, sets up an API key, and configures Claude Code. Takes ~2 minutes.
+
+### Option B: Manual Setup (5 Steps, ~10 minutes)
 
 ### Prerequisites
 
@@ -541,7 +551,7 @@ This means Claude can aggressively save memories without worrying about duplicat
 
 ## Roadmap
 
-- [ ] `npx create-context-hub` — one-command scaffolding for new users
+- [x] `npx create-context-hub` — one-command scaffolding for new users
 - [x] Import/export to JSON for backup and portability
 - [ ] Semantic search with embeddings (Cloudflare Workers AI, free tier)
 - [ ] Web dashboard for browsing memories (Cloudflare Pages, free)
