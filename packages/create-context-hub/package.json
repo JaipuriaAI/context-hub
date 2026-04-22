@@ -1,7 +1,7 @@
 {
   "name": "create-context-hub",
-  "version": "0.1.4",
-  "description": "Create a Claude Context Hub — your personal AI context layer across Claude interfaces. One command to scaffold, deploy, and connect.",
+  "version": "0.2.2",
+  "description": "Create a Context Hub — a personal AI context layer shared across any MCP client (Claude.ai, Claude Code, Claude App, ChatGPT, Perplexity, Cursor, and more). One command to scaffold, deploy, and connect.",
   "type": "module",
   "bin": "./dist/cli.js",
   "files": [
@@ -15,10 +15,15 @@
   "keywords": [
     "create",
     "claude",
+    "chatgpt",
+    "perplexity",
+    "cursor",
     "mcp",
     "context-hub",
     "cloudflare-workers",
     "ai-context",
+    "ai-memory",
+    "cross-client",
     "model-context-protocol"
   ],
   "author": "",

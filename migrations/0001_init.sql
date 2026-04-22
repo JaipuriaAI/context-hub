@@ -1,12 +1,12 @@
--- Claude Context Hub - Initial Schema
--- Stores memories, projects, instructions, and identity across Claude interfaces
+-- Context Hub - Initial Schema
+-- Stores memories, projects, instructions, and identity across any MCP client
 
 -- Memories: things Claude learns about you across conversations
 CREATE TABLE IF NOT EXISTS memories (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   content TEXT NOT NULL,
   category TEXT DEFAULT 'general',  -- general, preference, decision, learning, project
-  source TEXT DEFAULT 'unknown',    -- claude-ai, claude-code, manual, import
+  source TEXT DEFAULT 'unknown',    -- auto-detected from MCP client's clientInfo.name (any client: claude-code, claude-ai, claude-app, chatgpt, perplexity, cursor, windsurf, zed, custom agent systems, etc. — slugified, free-form). Also 'manual' / 'import' for seeded rows.
   tags TEXT DEFAULT '',              -- comma-separated tags for filtering
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS identity (
 -- Context log: breadcrumb trail of what was discussed where
 CREATE TABLE IF NOT EXISTS context_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  source TEXT NOT NULL,             -- claude-ai, claude-code, claude-app
+  source TEXT NOT NULL,             -- auto-detected from MCP client's clientInfo.name (any client: claude-code, claude-ai, chatgpt, perplexity, cursor, custom agent systems, etc. — slugified, free-form)
   summary TEXT NOT NULL,            -- brief summary of what was discussed
   project_name TEXT DEFAULT NULL,   -- optional project association
   created_at TEXT DEFAULT (datetime('now'))

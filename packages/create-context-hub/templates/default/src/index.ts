@@ -10,9 +10,26 @@ export interface Env {
 
 export class ContextHub extends McpAgent<Env> {
   server = new McpServer({
-    name: "Claude Context Hub",
+    name: "Context Hub",
     version: "0.1.0",
   });
+
+  // Return the MCP client's self-reported name, slugified for safe DB/URL use.
+  // Every MCP client sends clientInfo.name during the initialize handshake
+  // (e.g. "claude-code", "ChatGPT", "Perplexity", "cursor-vscode", or any custom
+  // agent system's own name). We do not map or translate — the client's own name
+  // is the source of truth. Falls back to "unknown" only if clientInfo is absent.
+  private detectSource(): string {
+    const name = this.server.server.getClientVersion()?.name;
+    if (!name) return "unknown";
+
+    const slug = name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 64);
+    return slug || "unknown";
+  }
 
   async init() {
     // ── MEMORIES ──────────────────────────────────────────────
@@ -28,7 +45,7 @@ SMART BEHAVIOR:
 - If user makes a decision like "let's go with X" → category: "decision"
 - If user teaches you something → category: "learning"
 - If it's about a specific project → category: "project"
-- Set source to "claude-ai" if you're in Claude.ai/Claude App, "claude-code" if in Claude Code
+- Source is auto-detected from the MCP client — do NOT pass source unless the user explicitly asks to override it (e.g. tagging a manual/import entry).
 - Add relevant tags for searchability (comma-separated, lowercase)`,
       {
         content: z.string().describe("The memory content to save"),
@@ -39,14 +56,19 @@ SMART BEHAVIOR:
         tags: z
           .string()
           .default("")
-          .describe("Comma-separated tags for filtering (e.g. 'python,auth,backend')"),
+          .describe(
+            "Comma-separated tags for filtering (e.g. 'python,auth,backend')",
+          ),
         source: z
-          .enum(["claude-ai", "claude-code", "claude-app", "manual", "import"])
-          .default("claude-ai")
-          .describe("Where this memory was captured"),
+          .string()
+          .optional()
+          .describe(
+            "Where this memory was captured. Auto-detected from the MCP client name if omitted (e.g. claude-code, chatgpt, perplexity, cursor). Only pass explicitly for 'manual' or 'import' seeding.",
+          ),
       },
       async ({ content, category, tags, source }) => {
         const db = this.env.DB;
+        const resolvedSource = source ?? this.detectSource();
 
         // Dedup check: look for existing memories with similar content
         // First try exact match
@@ -58,7 +80,9 @@ SMART BEHAVIOR:
         if (exact) {
           // Exact duplicate — update timestamp and tags instead of inserting
           await db
-            .prepare("UPDATE memories SET tags = ?, updated_at = datetime('now') WHERE id = ?")
+            .prepare(
+              "UPDATE memories SET tags = ?, updated_at = datetime('now') WHERE id = ?",
+            )
             .bind(tags || (exact as Record<string, unknown>).tags, exact.id)
             .run();
           return {
@@ -87,7 +111,7 @@ SMART BEHAVIOR:
               `SELECT m.id, m.content FROM memories_fts fts
                JOIN memories m ON fts.rowid = m.id
                WHERE fts.content MATCH ? AND m.category = ?
-               ORDER BY rank LIMIT 3`
+               ORDER BY rank LIMIT 3`,
             )
             .bind(keywords, category)
             .all();
@@ -95,22 +119,33 @@ SMART BEHAVIOR:
           // Check if any result is very similar (shares >60% of significant words)
           if (similar.results?.length) {
             const contentWords = new Set(
-              content.toLowerCase().replace(/[^\w\s]/g, "").split(/\s+/).filter((w) => w.length >= 3)
+              content
+                .toLowerCase()
+                .replace(/[^\w\s]/g, "")
+                .split(/\s+/)
+                .filter((w) => w.length >= 3),
             );
             for (const row of similar.results) {
               const existingWords = new Set(
-                (row.content as string).toLowerCase().replace(/[^\w\s]/g, "").split(/\s+/).filter((w: string) => w.length >= 3)
+                (row.content as string)
+                  .toLowerCase()
+                  .replace(/[^\w\s]/g, "")
+                  .split(/\s+/)
+                  .filter((w: string) => w.length >= 3),
               );
-              const overlap = [...contentWords].filter((w) => existingWords.has(w)).length;
-              const similarity = overlap / Math.max(contentWords.size, existingWords.size);
+              const overlap = [...contentWords].filter((w) =>
+                existingWords.has(w),
+              ).length;
+              const similarity =
+                overlap / Math.max(contentWords.size, existingWords.size);
 
               if (similarity > 0.6) {
                 // Very similar — update existing instead of creating duplicate
                 await db
                   .prepare(
-                    "UPDATE memories SET content = ?, tags = ?, source = ?, updated_at = datetime('now') WHERE id = ?"
+                    "UPDATE memories SET content = ?, tags = ?, source = ?, updated_at = datetime('now') WHERE id = ?",
                   )
-                  .bind(content, tags, source, row.id)
+                  .bind(content, tags, resolvedSource, row.id)
                   .run();
                 return {
                   content: [
@@ -128,20 +163,20 @@ SMART BEHAVIOR:
         // No duplicate found — insert new
         const result = await db
           .prepare(
-            "INSERT INTO memories (content, category, tags, source) VALUES (?, ?, ?, ?)"
+            "INSERT INTO memories (content, category, tags, source) VALUES (?, ?, ?, ?)",
           )
-          .bind(content, category, tags, source)
+          .bind(content, category, tags, resolvedSource)
           .run();
 
         return {
           content: [
             {
               type: "text" as const,
-              text: `Memory saved (id: ${result.meta.last_row_id}). Category: ${category}, Source: ${source}`,
+              text: `Memory saved (id: ${result.meta.last_row_id}). Category: ${category}, Source: ${resolvedSource}`,
             },
           ],
         };
-      }
+      },
     );
 
     this.server.tool(
@@ -156,7 +191,9 @@ SMART BEHAVIOR: Use natural keywords from the user's question as the query. If n
         category: z
           .string()
           .optional()
-          .describe("Filter by category (general, preference, decision, learning, project)"),
+          .describe(
+            "Filter by category (general, preference, decision, learning, project)",
+          ),
         limit: z.number().default(10).describe("Max results to return"),
       },
       async ({ query, category, limit }) => {
@@ -190,7 +227,10 @@ SMART BEHAVIOR: Use natural keywords from the user's question as the query. If n
         if (!results.results || results.results.length === 0) {
           return {
             content: [
-              { type: "text" as const, text: "No memories found matching your query." },
+              {
+                type: "text" as const,
+                text: "No memories found matching your query.",
+              },
             ],
           };
         }
@@ -198,7 +238,7 @@ SMART BEHAVIOR: Use natural keywords from the user's question as the query. If n
         const formatted = results.results
           .map(
             (r: Record<string, unknown>) =>
-              `[${r.id}] (${r.category}/${r.source}) ${r.content}\n    Tags: ${r.tags || "none"} | Created: ${r.created_at}`
+              `[${r.id}] (${r.category}/${r.source}) ${r.content}\n    Tags: ${r.tags || "none"} | Created: ${r.created_at}`,
           )
           .join("\n\n");
 
@@ -210,7 +250,7 @@ SMART BEHAVIOR: Use natural keywords from the user's question as the query. If n
             },
           ],
         };
-      }
+      },
     );
 
     this.server.tool(
@@ -222,16 +262,23 @@ WHEN TO USE: At session start for context, or when user asks to see their memori
 SMART BEHAVIOR FOR LIMITS:
 - User says "show recent" or "catch me up" → limit: 15
 - User says "show all" or "list everything" or "what's in my hub" → limit: 500 (returns ALL)
-- User asks about a specific source like "what did I save from my phone" → set source filter to "claude-app"
+- User asks about a specific source ("what did I save from ChatGPT / Perplexity / Cursor / my terminal / my phone") → pass that client's source slug as the filter (e.g. "chatgpt", "perplexity", "cursor", "claude-code", "claude-app")
 - User asks "what was imported" → set source to "import"
 - Default to 100 if user intent is unclear
 - NEVER cap at 20 when user says "all" — use 500`,
       {
-        limit: z.number().default(100).describe("How many memories to return. Use 500 when user says 'all' or 'everything'. Use 15-20 for 'recent'. Default 100 for general requests."),
+        limit: z
+          .number()
+          .default(100)
+          .describe(
+            "How many memories to return. Use 500 when user says 'all' or 'everything'. Use 15-20 for 'recent'. Default 100 for general requests.",
+          ),
         source: z
           .string()
           .optional()
-          .describe("Filter by source (claude-ai, claude-code, claude-app)"),
+          .describe(
+            "Filter by source slug (any MCP client name — e.g. claude-code, claude-ai, chatgpt, perplexity, cursor, or any custom agent system's own name). Also accepts 'manual' or 'import' for seeded data.",
+          ),
       },
       async ({ limit, source }) => {
         const db = this.env.DB;
@@ -248,11 +295,14 @@ SMART BEHAVIOR FOR LIMITS:
           params.push(limit);
         }
 
-        const results = await db.prepare(sql).bind(...params).all();
+        const results = await db
+          .prepare(sql)
+          .bind(...params)
+          .all();
         const formatted = (results.results || [])
           .map(
             (r: Record<string, unknown>) =>
-              `[${r.id}] (${r.category}/${r.source}) ${r.content}\n    Tags: ${r.tags || "none"} | ${r.created_at}`
+              `[${r.id}] (${r.category}/${r.source}) ${r.content}\n    Tags: ${r.tags || "none"} | ${r.created_at}`,
           )
           .join("\n\n");
 
@@ -266,7 +316,7 @@ SMART BEHAVIOR FOR LIMITS:
             },
           ],
         };
-      }
+      },
     );
 
     this.server.tool(
@@ -281,7 +331,7 @@ SMART BEHAVIOR FOR LIMITS:
         return {
           content: [{ type: "text" as const, text: `Memory ${id} deleted.` }],
         };
-      }
+      },
     );
 
     // ── PROJECTS ──────────────────────────────────────────────
@@ -294,11 +344,16 @@ WHEN TO USE: When the user starts talking about a specific project, app, or init
 SMART BEHAVIOR: Use the project name as a short, recognizable identifier (e.g. "context-hub", "portfolio", "auth-service"). Upserts — safe to call repeatedly with updated info.`,
       {
         name: z.string().describe("Project name (unique identifier)"),
-        description: z.string().default("").describe("What this project is about"),
+        description: z
+          .string()
+          .default("")
+          .describe("What this project is about"),
         instructions: z
           .string()
           .default("")
-          .describe("Custom instructions for Claude when working on this project"),
+          .describe(
+            "Custom instructions for Claude when working on this project",
+          ),
       },
       async ({ name, description, instructions }) => {
         const db = this.env.DB;
@@ -309,15 +364,17 @@ SMART BEHAVIOR: Use the project name as a short, recognizable identifier (e.g. "
              ON CONFLICT(name) DO UPDATE SET
                description = excluded.description,
                instructions = excluded.instructions,
-               updated_at = datetime('now')`
+               updated_at = datetime('now')`,
           )
           .bind(name, description, instructions)
           .run();
 
         return {
-          content: [{ type: "text" as const, text: `Project "${name}" saved.` }],
+          content: [
+            { type: "text" as const, text: `Project "${name}" saved.` },
+          ],
         };
-      }
+      },
     );
 
     this.server.tool(
@@ -349,7 +406,7 @@ SMART BEHAVIOR: Use the project name as a short, recognizable identifier (e.g. "
             },
           ],
         };
-      }
+      },
     );
 
     this.server.tool(
@@ -376,7 +433,7 @@ SMART BEHAVIOR: Use the project name as a short, recognizable identifier (e.g. "
         const formatted = (results.results || [])
           .map(
             (p: Record<string, unknown>) =>
-              `- ${p.name} (${p.status}): ${p.description || "(no description)"}`
+              `- ${p.name} (${p.status}): ${p.description || "(no description)"}`,
           )
           .join("\n");
 
@@ -390,7 +447,7 @@ SMART BEHAVIOR: Use the project name as a short, recognizable identifier (e.g. "
             },
           ],
         };
-      }
+      },
     );
 
     // ── INSTRUCTIONS ──────────────────────────────────────────
@@ -421,14 +478,18 @@ SMART CATEGORIZATION:
 
         // Dedup: check for exact or near-exact instruction match
         const existing = await db
-          .prepare("SELECT id, content FROM instructions WHERE content = ? AND type = ? LIMIT 1")
+          .prepare(
+            "SELECT id, content FROM instructions WHERE content = ? AND type = ? LIMIT 1",
+          )
           .bind(content, type)
           .first();
 
         if (existing) {
           // Update priority if different, otherwise just refresh
           await db
-            .prepare("UPDATE instructions SET priority = ?, updated_at = datetime('now') WHERE id = ?")
+            .prepare(
+              "UPDATE instructions SET priority = ?, updated_at = datetime('now') WHERE id = ?",
+            )
             .bind(priority, existing.id)
             .run();
           return {
@@ -443,7 +504,7 @@ SMART CATEGORIZATION:
 
         const result = await db
           .prepare(
-            "INSERT INTO instructions (type, content, priority) VALUES (?, ?, ?)"
+            "INSERT INTO instructions (type, content, priority) VALUES (?, ?, ?)",
           )
           .bind(type, content, priority)
           .run();
@@ -456,7 +517,7 @@ SMART CATEGORIZATION:
             },
           ],
         };
-      }
+      },
     );
 
     this.server.tool(
@@ -467,13 +528,14 @@ SMART CATEGORIZATION:
         const db = this.env.DB;
         const results = await db
           .prepare(
-            "SELECT id, type, content, priority FROM instructions WHERE active = 1 ORDER BY priority DESC"
+            "SELECT id, type, content, priority FROM instructions WHERE active = 1 ORDER BY priority DESC",
           )
           .all();
 
         const formatted = (results.results || [])
           .map(
-            (i: Record<string, unknown>) => `[${i.id}] (${i.type}, priority: ${i.priority}) ${i.content}`
+            (i: Record<string, unknown>) =>
+              `[${i.id}] (${i.type}, priority: ${i.priority}) ${i.content}`,
           )
           .join("\n\n");
 
@@ -487,7 +549,7 @@ SMART CATEGORIZATION:
             },
           ],
         };
-      }
+      },
     );
 
     // ── IDENTITY ──────────────────────────────────────────────
@@ -500,7 +562,11 @@ WHEN TO USE: When the user shares personal/professional details: name, role, com
 
 SMART KEY NAMING: Use consistent lowercase keys like: name, role, company, expertise, location, tools, education, email, languages, interests. Keep values concise but complete.`,
       {
-        key: z.string().describe("Identity field (e.g. 'name', 'role', 'expertise', 'location')"),
+        key: z
+          .string()
+          .describe(
+            "Identity field (e.g. 'name', 'role', 'expertise', 'location')",
+          ),
         value: z.string().describe("Value for this field"),
       },
       async ({ key, value }) => {
@@ -509,15 +575,17 @@ SMART KEY NAMING: Use consistent lowercase keys like: name, role, company, exper
           .prepare(
             `INSERT INTO identity (key, value)
              VALUES (?, ?)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
           )
           .bind(key, value)
           .run();
 
         return {
-          content: [{ type: "text" as const, text: `Identity: ${key} = "${value}"` }],
+          content: [
+            { type: "text" as const, text: `Identity: ${key} = "${value}"` },
+          ],
         };
-      }
+      },
     );
 
     this.server.tool(
@@ -533,7 +601,10 @@ SMART KEY NAMING: Use consistent lowercase keys like: name, role, company, exper
         if (!results.results || results.results.length === 0) {
           return {
             content: [
-              { type: "text" as const, text: "No identity information set yet." },
+              {
+                type: "text" as const,
+                text: "No identity information set yet.",
+              },
             ],
           };
         }
@@ -547,22 +618,27 @@ SMART KEY NAMING: Use consistent lowercase keys like: name, role, company, exper
             { type: "text" as const, text: `User Identity:\n${formatted}` },
           ],
         };
-      }
+      },
     );
 
     // ── CONTEXT LOG ───────────────────────────────────────────
 
     this.server.tool(
       "log_context",
-      `Log what was discussed — creates a breadcrumb trail across interfaces so the user's other Claude sessions know what happened here.
+      `Log what was discussed — creates a breadcrumb trail across interfaces so the user's other sessions (any MCP client) know what happened here.
 
 WHEN TO USE: At natural breakpoints — when a topic concludes, a decision is made, or a significant piece of work is done. Also call this when a session is ending.
-SMART BEHAVIOR: Set source to match your current interface. Keep summaries concise (1-2 sentences) but capture the key decision or topic.`,
+SMART BEHAVIOR: Source is auto-detected from the MCP client name — do NOT pass source unless the user explicitly asks to override it. Keep summaries concise (1-2 sentences) but capture the key decision or topic.`,
       {
-        summary: z.string().describe("Brief summary of what was discussed or decided"),
+        summary: z
+          .string()
+          .describe("Brief summary of what was discussed or decided"),
         source: z
-          .enum(["claude-ai", "claude-code", "claude-app"])
-          .describe("Which interface this is from"),
+          .string()
+          .optional()
+          .describe(
+            "Which interface this is from. Auto-detected from the MCP client name if omitted (e.g. claude-code, chatgpt, perplexity, cursor, or any agent system's own name).",
+          ),
         project_name: z
           .string()
           .optional()
@@ -570,6 +646,7 @@ SMART BEHAVIOR: Set source to match your current interface. Keep summaries conci
       },
       async ({ summary, source, project_name }) => {
         const db = this.env.DB;
+        const resolvedSource = source ?? this.detectSource();
 
         // Dedup: skip if same summary logged from same source in last 5 minutes
         const recent = await db
@@ -577,42 +654,54 @@ SMART BEHAVIOR: Set source to match your current interface. Keep summaries conci
             `SELECT id FROM context_log
              WHERE summary = ? AND source = ?
              AND created_at > datetime('now', '-5 minutes')
-             LIMIT 1`
+             LIMIT 1`,
           )
-          .bind(summary, source)
+          .bind(summary, resolvedSource)
           .first();
 
         if (recent) {
           return {
-            content: [{ type: "text" as const, text: `Context already logged recently. Skipped duplicate.` }],
+            content: [
+              {
+                type: "text" as const,
+                text: `Context already logged recently. Skipped duplicate.`,
+              },
+            ],
           };
         }
 
         await db
           .prepare(
-            "INSERT INTO context_log (summary, source, project_name) VALUES (?, ?, ?)"
+            "INSERT INTO context_log (summary, source, project_name) VALUES (?, ?, ?)",
           )
-          .bind(summary, source, project_name || null)
+          .bind(summary, resolvedSource, project_name || null)
           .run();
 
         return {
-          content: [{ type: "text" as const, text: `Context logged from ${source}.` }],
+          content: [
+            {
+              type: "text" as const,
+              text: `Context logged from ${resolvedSource}.`,
+            },
+          ],
         };
-      }
+      },
     );
 
     this.server.tool(
       "get_recent_context",
-      `Get recent context breadcrumbs from all interfaces. Shows what the user discussed in OTHER sessions (phone, browser, terminal).
+      `Get recent context breadcrumbs from all interfaces. Shows what the user discussed in OTHER sessions across any MCP client (phone, browser, terminal, ChatGPT, Perplexity, Cursor, custom agents, etc.).
 
-WHEN TO USE: When the user says things like "what was I working on?", "continue where I left off", "what did I discuss on my phone?". Also useful at session start to catch up.
-SMART FILTERING: If user mentions a specific interface ("on my phone" → source: "claude-app", "in the browser" → source: "claude-ai", "in the terminal" → source: "claude-code"), filter by it.`,
+WHEN TO USE: When the user says things like "what was I working on?", "continue where I left off", "what did I discuss on my phone?", "what did I do in ChatGPT yesterday?". Also useful at session start to catch up.
+SMART FILTERING: If the user mentions a specific interface, pass that client's source slug — e.g. "on my phone" → "claude-app", "in the browser" → "claude-ai", "in the terminal" → "claude-code", "in ChatGPT" → "chatgpt", "in Perplexity" → "perplexity", "in Cursor" → "cursor". Slugs are whatever name the MCP client self-reported, lowercased with non-alphanumerics replaced by dashes.`,
       {
         limit: z.number().default(10).describe("Number of recent entries"),
         source: z
           .string()
           .optional()
-          .describe("Filter by source interface"),
+          .describe(
+            "Filter by source slug (any MCP client's self-reported name — e.g. claude-code, claude-ai, chatgpt, perplexity, cursor, or a custom agent system's own name).",
+          ),
       },
       async ({ limit, source }) => {
         const db = this.env.DB;
@@ -629,11 +718,14 @@ SMART FILTERING: If user mentions a specific interface ("on my phone" → source
           params.push(limit);
         }
 
-        const results = await db.prepare(sql).bind(...params).all();
+        const results = await db
+          .prepare(sql)
+          .bind(...params)
+          .all();
         const formatted = (results.results || [])
           .map(
             (c: Record<string, unknown>) =>
-              `[${c.created_at}] (${c.source}${c.project_name ? ` / ${c.project_name}` : ""}) ${c.summary}`
+              `[${c.created_at}] (${c.source}${c.project_name ? ` / ${c.project_name}` : ""}) ${c.summary}`,
           )
           .join("\n");
 
@@ -647,7 +739,7 @@ SMART FILTERING: If user mentions a specific interface ("on my phone" → source
             },
           ],
         };
-      }
+      },
     );
 
     // ── UPDATE MEMORY ──────────────────────────────────────────
@@ -664,25 +756,35 @@ SMART BEHAVIOR:
 - Returns the updated memory so the user can confirm the change`,
       {
         id: z.number().describe("Memory ID to update"),
-        content: z.string().optional().describe("New content (leave empty to keep existing)"),
+        content: z
+          .string()
+          .optional()
+          .describe("New content (leave empty to keep existing)"),
         category: z
           .enum(["general", "preference", "decision", "learning", "project"])
           .optional()
           .describe("New category (leave empty to keep existing)"),
-        tags: z.string().optional().describe("New tags (leave empty to keep existing)"),
+        tags: z
+          .string()
+          .optional()
+          .describe("New tags (leave empty to keep existing)"),
       },
       async ({ id, content, category, tags }) => {
         const db = this.env.DB;
 
         // Check if memory exists
         const existing = await db
-          .prepare("SELECT id, content, category, tags FROM memories WHERE id = ?")
+          .prepare(
+            "SELECT id, content, category, tags FROM memories WHERE id = ?",
+          )
           .bind(id)
           .first();
 
         if (!existing) {
           return {
-            content: [{ type: "text" as const, text: `Memory ${id} not found.` }],
+            content: [
+              { type: "text" as const, text: `Memory ${id} not found.` },
+            ],
           };
         }
 
@@ -693,7 +795,7 @@ SMART BEHAVIOR:
 
         await db
           .prepare(
-            "UPDATE memories SET content = ?, category = ?, tags = ?, updated_at = datetime('now') WHERE id = ?"
+            "UPDATE memories SET content = ?, category = ?, tags = ?, updated_at = datetime('now') WHERE id = ?",
           )
           .bind(newContent, newCategory, newTags, id)
           .run();
@@ -706,7 +808,7 @@ SMART BEHAVIOR:
             },
           ],
         };
-      }
+      },
     );
 
     // ── DECISIONS ──────────────────────────────────────────────
@@ -721,7 +823,6 @@ SMART BEHAVIOR:
 - Extract the decision, reasoning, and rejected alternatives from the user's message
 - Always include reasoning — if not stated, ask "what's the reasoning?"
 - Link to a project if the decision is project-specific
-- Set source to match current interface (auto-detected)
 - Add relevant tags for searchability`,
       {
         decision: z.string().describe("The decision that was made"),
@@ -739,7 +840,13 @@ SMART BEHAVIOR:
           .default("")
           .describe("Comma-separated tags for filtering"),
       },
-      async ({ decision, reasoning, alternatives_rejected, project_name, tags }) => {
+      async ({
+        decision,
+        reasoning,
+        alternatives_rejected,
+        project_name,
+        tags,
+      }) => {
         const db = this.env.DB;
 
         // Format structured content
@@ -753,13 +860,17 @@ SMART BEHAVIOR:
 
         // Dedup: check for exact decision match
         const exact = await db
-          .prepare("SELECT id FROM memories WHERE content = ? AND category = 'decision' LIMIT 1")
+          .prepare(
+            "SELECT id FROM memories WHERE content = ? AND category = 'decision' LIMIT 1",
+          )
           .bind(structuredContent)
           .first();
 
         if (exact) {
           await db
-            .prepare("UPDATE memories SET tags = ?, updated_at = datetime('now') WHERE id = ?")
+            .prepare(
+              "UPDATE memories SET tags = ?, updated_at = datetime('now') WHERE id = ?",
+            )
             .bind(tags || (exact as Record<string, unknown>).tags, exact.id)
             .run();
           return {
@@ -772,12 +883,12 @@ SMART BEHAVIOR:
           };
         }
 
-        // Detect source from environment context
-        const source = "claude-ai";
+        // Auto-detect source from the MCP client's clientInfo.name
+        const source = this.detectSource();
 
         const result = await db
           .prepare(
-            "INSERT INTO memories (content, category, tags, source) VALUES (?, 'decision', ?, ?)"
+            "INSERT INTO memories (content, category, tags, source) VALUES (?, 'decision', ?, ?)",
           )
           .bind(structuredContent, tags, source)
           .run();
@@ -790,7 +901,7 @@ SMART BEHAVIOR:
             },
           ],
         };
-      }
+      },
     );
 
     this.server.tool(
@@ -805,10 +916,7 @@ SMART BEHAVIOR:
 - Returns the full decision structure including reasoning and alternatives`,
       {
         query: z.string().describe("Search query — natural language works"),
-        project_name: z
-          .string()
-          .optional()
-          .describe("Filter by project name"),
+        project_name: z.string().optional().describe("Filter by project name"),
         limit: z.number().default(10).describe("Max results to return"),
       },
       async ({ query, project_name, limit }) => {
@@ -821,7 +929,7 @@ SMART BEHAVIOR:
              JOIN memories m ON fts.rowid = m.id
              WHERE fts.content MATCH ? AND m.category = 'decision'
              ORDER BY rank
-             LIMIT ?`
+             LIMIT ?`,
           )
           .bind(query, limit)
           .all();
@@ -831,14 +939,17 @@ SMART BEHAVIOR:
         // If project_name provided, filter further
         if (project_name && decisions.length) {
           decisions = decisions.filter((d: Record<string, unknown>) =>
-            (d.content as string).includes(`PROJECT: ${project_name}`)
+            (d.content as string).includes(`PROJECT: ${project_name}`),
           );
         }
 
         if (!decisions.length) {
           return {
             content: [
-              { type: "text" as const, text: "No decisions found matching your query." },
+              {
+                type: "text" as const,
+                text: "No decisions found matching your query.",
+              },
             ],
           };
         }
@@ -846,7 +957,7 @@ SMART BEHAVIOR:
         const formatted = decisions
           .map(
             (r: Record<string, unknown>) =>
-              `[${r.id}] ${r.content}\n    Tags: ${r.tags || "none"} | Source: ${r.source} | ${r.created_at}`
+              `[${r.id}] ${r.content}\n    Tags: ${r.tags || "none"} | Source: ${r.source} | ${r.created_at}`,
           )
           .join("\n\n");
 
@@ -858,7 +969,7 @@ SMART BEHAVIOR:
             },
           ],
         };
-      }
+      },
     );
 
     // ── DELETE INSTRUCTION ─────────────────────────────────────
@@ -885,11 +996,16 @@ SMART BEHAVIOR:
 
         if (!existing) {
           return {
-            content: [{ type: "text" as const, text: `Instruction ${id} not found.` }],
+            content: [
+              { type: "text" as const, text: `Instruction ${id} not found.` },
+            ],
           };
         }
 
-        await db.prepare("DELETE FROM instructions WHERE id = ?").bind(id).run();
+        await db
+          .prepare("DELETE FROM instructions WHERE id = ?")
+          .bind(id)
+          .run();
         return {
           content: [
             {
@@ -898,7 +1014,7 @@ SMART BEHAVIOR:
             },
           ],
         };
-      }
+      },
     );
 
     // ── ARCHIVE PROJECT ────────────────────────────────────────
@@ -926,25 +1042,39 @@ SMART BEHAVIOR:
 
         if (!existing) {
           return {
-            content: [{ type: "text" as const, text: `Project "${name}" not found.` }],
+            content: [
+              { type: "text" as const, text: `Project "${name}" not found.` },
+            ],
           };
         }
 
         if ((existing as Record<string, unknown>).status === "archived") {
           return {
-            content: [{ type: "text" as const, text: `Project "${name}" is already archived.` }],
+            content: [
+              {
+                type: "text" as const,
+                text: `Project "${name}" is already archived.`,
+              },
+            ],
           };
         }
 
         await db
-          .prepare("UPDATE projects SET status = 'archived', updated_at = datetime('now') WHERE name = ?")
+          .prepare(
+            "UPDATE projects SET status = 'archived', updated_at = datetime('now') WHERE name = ?",
+          )
           .bind(name)
           .run();
 
         return {
-          content: [{ type: "text" as const, text: `Project "${name}" archived. Use list_projects with status 'all' to see it, or save_project to reactivate.` }],
+          content: [
+            {
+              type: "text" as const,
+              text: `Project "${name}" archived. Use list_projects with status 'all' to see it, or save_project to reactivate.`,
+            },
+          ],
         };
-      }
+      },
     );
 
     // ── EXPORT HUB ─────────────────────────────────────────────
@@ -965,11 +1095,31 @@ SMART BEHAVIOR:
 
         const [identity, instructions, memories, projects, contextLog] =
           await Promise.all([
-            db.prepare("SELECT key, value, created_at, updated_at FROM identity ORDER BY key").all(),
-            db.prepare("SELECT id, type, content, priority, active, created_at, updated_at FROM instructions ORDER BY priority DESC").all(),
-            db.prepare("SELECT id, content, category, tags, source, created_at, updated_at FROM memories ORDER BY created_at DESC").all(),
-            db.prepare("SELECT id, name, description, instructions, status, created_at, updated_at FROM projects ORDER BY updated_at DESC").all(),
-            db.prepare("SELECT id, source, summary, project_name, created_at FROM context_log ORDER BY created_at DESC").all(),
+            db
+              .prepare(
+                "SELECT key, value, created_at, updated_at FROM identity ORDER BY key",
+              )
+              .all(),
+            db
+              .prepare(
+                "SELECT id, type, content, priority, active, created_at, updated_at FROM instructions ORDER BY priority DESC",
+              )
+              .all(),
+            db
+              .prepare(
+                "SELECT id, content, category, tags, source, created_at, updated_at FROM memories ORDER BY created_at DESC",
+              )
+              .all(),
+            db
+              .prepare(
+                "SELECT id, name, description, instructions, status, created_at, updated_at FROM projects ORDER BY updated_at DESC",
+              )
+              .all(),
+            db
+              .prepare(
+                "SELECT id, source, summary, project_name, created_at FROM context_log ORDER BY created_at DESC",
+              )
+              .all(),
           ]);
 
         const exportData = {
@@ -989,7 +1139,7 @@ SMART BEHAVIOR:
             },
           ],
         };
-      }
+      },
     );
 
     // ── IMPORT HUB ─────────────────────────────────────────────
@@ -1009,7 +1159,9 @@ SMART BEHAVIOR:
 - Context log: inserts all entries (logs are append-only)
 - Returns a summary of imported vs skipped items per table`,
       {
-        data: z.string().describe("JSON string of the export data (from export_hub output)"),
+        data: z
+          .string()
+          .describe("JSON string of the export data (from export_hub output)"),
       },
       async ({ data }) => {
         const db = this.env.DB;
@@ -1019,7 +1171,12 @@ SMART BEHAVIOR:
           parsed = JSON.parse(data) as Record<string, unknown[]>;
         } catch {
           return {
-            content: [{ type: "text" as const, text: "Invalid JSON. Please provide a valid export JSON string." }],
+            content: [
+              {
+                type: "text" as const,
+                text: "Invalid JSON. Please provide a valid export JSON string.",
+              },
+            ],
           };
         }
 
@@ -1040,7 +1197,7 @@ SMART BEHAVIOR:
                 .prepare(
                   `INSERT INTO identity (key, value)
                    VALUES (?, ?)
-                   ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
                 )
                 .bind(row.key, row.value)
                 .run();
@@ -1064,13 +1221,13 @@ SMART BEHAVIOR:
               } else {
                 await db
                   .prepare(
-                    "INSERT INTO memories (content, category, tags, source) VALUES (?, ?, ?, ?)"
+                    "INSERT INTO memories (content, category, tags, source) VALUES (?, ?, ?, ?)",
                   )
                   .bind(
                     row.content,
                     row.category || "general",
                     row.tags || "",
-                    row.source || "import"
+                    row.source || "import",
                   )
                   .run();
                 counts.memories.imported++;
@@ -1085,7 +1242,9 @@ SMART BEHAVIOR:
             const row = item as Record<string, unknown>;
             if (row.content && row.type) {
               const existing = await db
-                .prepare("SELECT id FROM instructions WHERE content = ? AND type = ? LIMIT 1")
+                .prepare(
+                  "SELECT id FROM instructions WHERE content = ? AND type = ? LIMIT 1",
+                )
                 .bind(row.content, row.type)
                 .first();
 
@@ -1094,7 +1253,7 @@ SMART BEHAVIOR:
               } else {
                 await db
                   .prepare(
-                    "INSERT INTO instructions (type, content, priority) VALUES (?, ?, ?)"
+                    "INSERT INTO instructions (type, content, priority) VALUES (?, ?, ?)",
                   )
                   .bind(row.type, row.content, row.priority || 0)
                   .run();
@@ -1117,13 +1276,13 @@ SMART BEHAVIOR:
                      description = excluded.description,
                      instructions = excluded.instructions,
                      status = excluded.status,
-                     updated_at = datetime('now')`
+                     updated_at = datetime('now')`,
                 )
                 .bind(
                   row.name,
                   row.description || "",
                   row.instructions || "",
-                  row.status || "active"
+                  row.status || "active",
                 )
                 .run();
               counts.projects.imported++;
@@ -1138,9 +1297,13 @@ SMART BEHAVIOR:
             if (row.summary) {
               await db
                 .prepare(
-                  "INSERT INTO context_log (summary, source, project_name) VALUES (?, ?, ?)"
+                  "INSERT INTO context_log (summary, source, project_name) VALUES (?, ?, ?)",
                 )
-                .bind(row.summary, row.source || "import", row.project_name || null)
+                .bind(
+                  row.summary,
+                  row.source || "import",
+                  row.project_name || null,
+                )
                 .run();
               counts.context_log.imported++;
             }
@@ -1150,7 +1313,7 @@ SMART BEHAVIOR:
         const summary = Object.entries(counts)
           .map(
             ([table, c]) =>
-              `- ${table}: ${c.imported} imported, ${c.skipped} skipped (duplicates)`
+              `- ${table}: ${c.imported} imported, ${c.skipped} skipped (duplicates)`,
           )
           .join("\n");
 
@@ -1162,7 +1325,7 @@ SMART BEHAVIOR:
             },
           ],
         };
-      }
+      },
     );
 
     // ── GET PROJECT CONTEXT ────────────────────────────────────
@@ -1177,7 +1340,9 @@ SMART BEHAVIOR:
 - Returns project details + custom instructions + all memories tagged/categorized for that project + decisions related to that project + recent context logs mentioning that project
 - Call this BEFORE starting work on any specific project`,
       {
-        project_name: z.string().describe("The project name to load context for"),
+        project_name: z
+          .string()
+          .describe("The project name to load context for"),
       },
       async ({ project_name }) => {
         const db = this.env.DB;
@@ -1193,9 +1358,13 @@ SMART BEHAVIOR:
           .prepare(
             `SELECT id, content, category, tags, source, created_at FROM memories
              WHERE tags LIKE ? OR category = 'project' AND content LIKE ? OR content LIKE ?
-             ORDER BY created_at DESC LIMIT 50`
+             ORDER BY created_at DESC LIMIT 50`,
           )
-          .bind(`%${project_name}%`, `%${project_name}%`, `%PROJECT: ${project_name}%`)
+          .bind(
+            `%${project_name}%`,
+            `%${project_name}%`,
+            `%PROJECT: ${project_name}%`,
+          )
           .all();
 
         // Get decisions for this project
@@ -1203,7 +1372,7 @@ SMART BEHAVIOR:
           .prepare(
             `SELECT id, content, tags, source, created_at FROM memories
              WHERE category = 'decision' AND content LIKE ?
-             ORDER BY created_at DESC LIMIT 20`
+             ORDER BY created_at DESC LIMIT 20`,
           )
           .bind(`%PROJECT: ${project_name}%`)
           .all();
@@ -1213,7 +1382,7 @@ SMART BEHAVIOR:
           .prepare(
             `SELECT summary, source, created_at FROM context_log
              WHERE project_name = ?
-             ORDER BY created_at DESC LIMIT 20`
+             ORDER BY created_at DESC LIMIT 20`,
           )
           .bind(project_name)
           .all();
@@ -1221,7 +1390,7 @@ SMART BEHAVIOR:
         // Get instructions (global — always relevant)
         const instructions = await db
           .prepare(
-            "SELECT type, content FROM instructions WHERE active = 1 ORDER BY priority DESC"
+            "SELECT type, content FROM instructions WHERE active = 1 ORDER BY priority DESC",
           )
           .all();
 
@@ -1231,11 +1400,11 @@ SMART BEHAVIOR:
         if (project) {
           const p = project as Record<string, unknown>;
           sections.push(
-            `## Project: ${p.name}\nStatus: ${p.status}\nDescription: ${p.description || "(none)"}\n\nProject Instructions:\n${p.instructions || "(none)"}`
+            `## Project: ${p.name}\nStatus: ${p.status}\nDescription: ${p.description || "(none)"}\n\nProject Instructions:\n${p.instructions || "(none)"}`,
           );
         } else {
           sections.push(
-            `## Project: ${project_name}\n(Project not found in hub — showing related data only)`
+            `## Project: ${project_name}\n(Project not found in hub — showing related data only)`,
           );
         }
 
@@ -1244,8 +1413,10 @@ SMART BEHAVIOR:
           sections.push(
             "## Global Instructions\n" +
               instructions.results
-                .map((i: Record<string, unknown>) => `- [${i.type}] ${i.content}`)
-                .join("\n")
+                .map(
+                  (i: Record<string, unknown>) => `- [${i.type}] ${i.content}`,
+                )
+                .join("\n"),
           );
         }
 
@@ -1256,9 +1427,9 @@ SMART BEHAVIOR:
               memories.results
                 .map(
                   (m: Record<string, unknown>) =>
-                    `- [${m.id}] (${m.category}/${m.source}) ${m.content}${m.tags ? ` [tags: ${m.tags}]` : ""}`
+                    `- [${m.id}] (${m.category}/${m.source}) ${m.content}${m.tags ? ` [tags: ${m.tags}]` : ""}`,
                 )
-                .join("\n")
+                .join("\n"),
           );
         }
 
@@ -1269,9 +1440,9 @@ SMART BEHAVIOR:
               decisions.results
                 .map(
                   (d: Record<string, unknown>) =>
-                    `- [${d.id}] ${d.content}\n    Tags: ${d.tags || "none"} | ${d.created_at}`
+                    `- [${d.id}] ${d.content}\n    Tags: ${d.tags || "none"} | ${d.created_at}`,
                 )
-                .join("\n")
+                .join("\n"),
           );
         }
 
@@ -1282,9 +1453,9 @@ SMART BEHAVIOR:
               contextLogs.results
                 .map(
                   (c: Record<string, unknown>) =>
-                    `- [${c.source}] ${c.summary} (${c.created_at})`
+                    `- [${c.source}] ${c.summary} (${c.created_at})`,
                 )
-                .join("\n")
+                .join("\n"),
           );
         }
 
@@ -1295,7 +1466,7 @@ SMART BEHAVIOR:
         return {
           content: [{ type: "text" as const, text: output }],
         };
-      }
+      },
     );
 
     // ── FULL CONTEXT DUMP ─────────────────────────────────────
@@ -1306,8 +1477,14 @@ SMART BEHAVIOR:
 
 WHEN TO USE: At the very start of every new session. This is the single most important tool — it gives you the full picture of who the user is, how they want you to behave, what they've been working on, and what happened in their other sessions. Call this FIRST before doing anything else.`,
       {
-        memory_limit: z.number().default(15).describe("Number of recent memories to include"),
-        context_limit: z.number().default(10).describe("Number of recent context entries"),
+        memory_limit: z
+          .number()
+          .default(15)
+          .describe("Number of recent memories to include"),
+        context_limit: z
+          .number()
+          .default(10)
+          .describe("Number of recent context entries"),
       },
       async ({ memory_limit, context_limit }) => {
         const db = this.env.DB;
@@ -1317,24 +1494,24 @@ WHEN TO USE: At the very start of every new session. This is the single most imp
             db.prepare("SELECT key, value FROM identity ORDER BY key").all(),
             db
               .prepare(
-                "SELECT type, content FROM instructions WHERE active = 1 ORDER BY priority DESC"
+                "SELECT type, content FROM instructions WHERE active = 1 ORDER BY priority DESC",
               )
               .all(),
             db
               .prepare(
-                "SELECT content, category, source, created_at FROM memories ORDER BY created_at DESC LIMIT ?"
+                "SELECT content, category, source, created_at FROM memories ORDER BY created_at DESC LIMIT ?",
               )
               .bind(memory_limit)
               .all(),
             db
               .prepare(
-                "SELECT summary, source, project_name, created_at FROM context_log ORDER BY created_at DESC LIMIT ?"
+                "SELECT summary, source, project_name, created_at FROM context_log ORDER BY created_at DESC LIMIT ?",
               )
               .bind(context_limit)
               .all(),
             db
               .prepare(
-                "SELECT name, description FROM projects WHERE status = 'active' ORDER BY updated_at DESC"
+                "SELECT name, description FROM projects WHERE status = 'active' ORDER BY updated_at DESC",
               )
               .all(),
           ]);
@@ -1347,7 +1524,7 @@ WHEN TO USE: At the very start of every new session. This is the single most imp
             "## Identity\n" +
               identity.results
                 .map((i: Record<string, unknown>) => `- ${i.key}: ${i.value}`)
-                .join("\n")
+                .join("\n"),
           );
         }
 
@@ -1356,8 +1533,10 @@ WHEN TO USE: At the very start of every new session. This is the single most imp
           sections.push(
             "## Custom Instructions\n" +
               instructions.results
-                .map((i: Record<string, unknown>) => `- [${i.type}] ${i.content}`)
-                .join("\n")
+                .map(
+                  (i: Record<string, unknown>) => `- [${i.type}] ${i.content}`,
+                )
+                .join("\n"),
           );
         }
 
@@ -1368,9 +1547,9 @@ WHEN TO USE: At the very start of every new session. This is the single most imp
               projects.results
                 .map(
                   (p: Record<string, unknown>) =>
-                    `- **${p.name}**: ${p.description || "(no description)"}`
+                    `- **${p.name}**: ${p.description || "(no description)"}`,
                 )
-                .join("\n")
+                .join("\n"),
           );
         }
 
@@ -1381,9 +1560,9 @@ WHEN TO USE: At the very start of every new session. This is the single most imp
               memories.results
                 .map(
                   (m: Record<string, unknown>) =>
-                    `- (${m.category}/${m.source}) ${m.content}`
+                    `- (${m.category}/${m.source}) ${m.content}`,
                 )
-                .join("\n")
+                .join("\n"),
           );
         }
 
@@ -1394,9 +1573,9 @@ WHEN TO USE: At the very start of every new session. This is the single most imp
               context.results
                 .map(
                   (c: Record<string, unknown>) =>
-                    `- [${c.source}] ${c.summary} (${c.created_at})`
+                    `- [${c.source}] ${c.summary} (${c.created_at})`,
                 )
-                .join("\n")
+                .join("\n"),
           );
         }
 
@@ -1407,7 +1586,7 @@ WHEN TO USE: At the very start of every new session. This is the single most imp
         return {
           content: [{ type: "text" as const, text: output }],
         };
-      }
+      },
     );
 
     // ── LIST ALL DATA ───────────────────────────────────────────
@@ -1419,70 +1598,126 @@ WHEN TO USE: At the very start of every new session. This is the single most imp
 WHEN TO USE: When user says "show me everything", "what's in my hub?", "list all data", "inventory", or wants to audit their stored context. This returns the FULL database contents across all tables.
 NOTE: For large hubs this may return a lot of data. If user only wants one category, use the boolean flags to include/exclude tables.`,
       {
-        include_memories: z.boolean().default(true).describe("Include all memories"),
-        include_identity: z.boolean().default(true).describe("Include identity fields"),
-        include_instructions: z.boolean().default(true).describe("Include instructions"),
-        include_projects: z.boolean().default(true).describe("Include projects"),
-        include_context_log: z.boolean().default(true).describe("Include context log"),
+        include_memories: z
+          .boolean()
+          .default(true)
+          .describe("Include all memories"),
+        include_identity: z
+          .boolean()
+          .default(true)
+          .describe("Include identity fields"),
+        include_instructions: z
+          .boolean()
+          .default(true)
+          .describe("Include instructions"),
+        include_projects: z
+          .boolean()
+          .default(true)
+          .describe("Include projects"),
+        include_context_log: z
+          .boolean()
+          .default(true)
+          .describe("Include context log"),
       },
-      async ({ include_memories, include_identity, include_instructions, include_projects, include_context_log }) => {
+      async ({
+        include_memories,
+        include_identity,
+        include_instructions,
+        include_projects,
+        include_context_log,
+      }) => {
         const db = this.env.DB;
         const sections: string[] = [];
 
         if (include_identity) {
-          const results = await db.prepare("SELECT key, value FROM identity ORDER BY key").all();
+          const results = await db
+            .prepare("SELECT key, value FROM identity ORDER BY key")
+            .all();
           if (results.results?.length) {
             sections.push(
               `## Identity (${results.results.length} fields)\n` +
-              results.results.map((r: Record<string, unknown>) => `- **${r.key}**: ${r.value}`).join("\n")
+                results.results
+                  .map(
+                    (r: Record<string, unknown>) =>
+                      `- **${r.key}**: ${r.value}`,
+                  )
+                  .join("\n"),
             );
           }
         }
 
         if (include_instructions) {
-          const results = await db.prepare("SELECT id, type, content, priority, active FROM instructions ORDER BY priority DESC").all();
+          const results = await db
+            .prepare(
+              "SELECT id, type, content, priority, active FROM instructions ORDER BY priority DESC",
+            )
+            .all();
           if (results.results?.length) {
             sections.push(
               `## Instructions (${results.results.length} total)\n` +
-              results.results.map((r: Record<string, unknown>) =>
-                `- [${r.id}] (${r.type}, priority: ${r.priority}${r.active ? "" : ", INACTIVE"}) ${r.content}`
-              ).join("\n")
+                results.results
+                  .map(
+                    (r: Record<string, unknown>) =>
+                      `- [${r.id}] (${r.type}, priority: ${r.priority}${r.active ? "" : ", INACTIVE"}) ${r.content}`,
+                  )
+                  .join("\n"),
             );
           }
         }
 
         if (include_projects) {
-          const results = await db.prepare("SELECT name, description, instructions, status FROM projects ORDER BY updated_at DESC").all();
+          const results = await db
+            .prepare(
+              "SELECT name, description, instructions, status FROM projects ORDER BY updated_at DESC",
+            )
+            .all();
           if (results.results?.length) {
             sections.push(
               `## Projects (${results.results.length} total)\n` +
-              results.results.map((r: Record<string, unknown>) =>
-                `### ${r.name} (${r.status})\n${r.description || "(no description)"}${r.instructions ? `\n**Instructions:** ${r.instructions}` : ""}`
-              ).join("\n\n")
+                results.results
+                  .map(
+                    (r: Record<string, unknown>) =>
+                      `### ${r.name} (${r.status})\n${r.description || "(no description)"}${r.instructions ? `\n**Instructions:** ${r.instructions}` : ""}`,
+                  )
+                  .join("\n\n"),
             );
           }
         }
 
         if (include_memories) {
-          const results = await db.prepare("SELECT id, content, category, tags, source, created_at FROM memories ORDER BY created_at DESC").all();
+          const results = await db
+            .prepare(
+              "SELECT id, content, category, tags, source, created_at FROM memories ORDER BY created_at DESC",
+            )
+            .all();
           if (results.results?.length) {
             sections.push(
               `## Memories (${results.results.length} total)\n` +
-              results.results.map((r: Record<string, unknown>) =>
-                `- [${r.id}] (${r.category}/${r.source}) ${r.content}${r.tags ? ` [tags: ${r.tags}]` : ""}`
-              ).join("\n")
+                results.results
+                  .map(
+                    (r: Record<string, unknown>) =>
+                      `- [${r.id}] (${r.category}/${r.source}) ${r.content}${r.tags ? ` [tags: ${r.tags}]` : ""}`,
+                  )
+                  .join("\n"),
             );
           }
         }
 
         if (include_context_log) {
-          const results = await db.prepare("SELECT summary, source, project_name, created_at FROM context_log ORDER BY created_at DESC LIMIT 50").all();
+          const results = await db
+            .prepare(
+              "SELECT summary, source, project_name, created_at FROM context_log ORDER BY created_at DESC LIMIT 50",
+            )
+            .all();
           if (results.results?.length) {
             sections.push(
               `## Context Log (${results.results.length} entries)\n` +
-              results.results.map((r: Record<string, unknown>) =>
-                `- [${r.created_at}] (${r.source}${r.project_name ? ` / ${r.project_name}` : ""}) ${r.summary}`
-              ).join("\n")
+                results.results
+                  .map(
+                    (r: Record<string, unknown>) =>
+                      `- [${r.created_at}] (${r.source}${r.project_name ? ` / ${r.project_name}` : ""}) ${r.summary}`,
+                  )
+                  .join("\n"),
             );
           }
         }
@@ -1494,7 +1729,7 @@ NOTE: For large hubs this may return a lot of data. If user only wants one categ
         return {
           content: [{ type: "text" as const, text: output }],
         };
-      }
+      },
     );
 
     // ── HUB STATS / DASHBOARD ─────────────────────────────────
@@ -1538,25 +1773,55 @@ Use plenty of color, whitespace, and visual hierarchy. Think of it as a clean, m
           // Total memories
           db.prepare("SELECT COUNT(*) as count FROM memories").first(),
           // Memories by category
-          db.prepare("SELECT category, COUNT(*) as count FROM memories GROUP BY category ORDER BY count DESC").all(),
+          db
+            .prepare(
+              "SELECT category, COUNT(*) as count FROM memories GROUP BY category ORDER BY count DESC",
+            )
+            .all(),
           // Memories by source
-          db.prepare("SELECT source, COUNT(*) as count FROM memories GROUP BY source ORDER BY count DESC").all(),
+          db
+            .prepare(
+              "SELECT source, COUNT(*) as count FROM memories GROUP BY source ORDER BY count DESC",
+            )
+            .all(),
           // Projects (active vs archived)
-          db.prepare("SELECT status, COUNT(*) as count FROM projects GROUP BY status").all(),
+          db
+            .prepare(
+              "SELECT status, COUNT(*) as count FROM projects GROUP BY status",
+            )
+            .all(),
           // Instructions
-          db.prepare("SELECT COUNT(*) as count FROM instructions WHERE active = 1").first(),
+          db
+            .prepare(
+              "SELECT COUNT(*) as count FROM instructions WHERE active = 1",
+            )
+            .first(),
           // Identity fields
           db.prepare("SELECT COUNT(*) as count FROM identity").first(),
           // Context log entries
           db.prepare("SELECT COUNT(*) as count FROM context_log").first(),
           // Activity: last 24h
-          db.prepare("SELECT COUNT(*) as count FROM memories WHERE created_at > datetime('now', '-1 day')").first(),
+          db
+            .prepare(
+              "SELECT COUNT(*) as count FROM memories WHERE created_at > datetime('now', '-1 day')",
+            )
+            .first(),
           // Activity: last 7 days
-          db.prepare("SELECT COUNT(*) as count FROM memories WHERE created_at > datetime('now', '-7 days')").first(),
+          db
+            .prepare(
+              "SELECT COUNT(*) as count FROM memories WHERE created_at > datetime('now', '-7 days')",
+            )
+            .first(),
           // Activity: last 30 days
-          db.prepare("SELECT COUNT(*) as count FROM memories WHERE created_at > datetime('now', '-30 days')").first(),
+          db
+            .prepare(
+              "SELECT COUNT(*) as count FROM memories WHERE created_at > datetime('now', '-30 days')",
+            )
+            .first(),
           // Top tags (explode comma-separated tags and count)
-          db.prepare(`
+          db
+            .prepare(
+              `
             WITH RECURSIVE split_tags AS (
               SELECT id, trim(substr(tags, 1, instr(tags || ',', ',') - 1)) as tag,
                      substr(tags, instr(tags || ',', ',') + 1) as rest
@@ -1567,74 +1832,119 @@ Use plenty of color, whitespace, and visual hierarchy. Think of it as a clean, m
               FROM split_tags WHERE rest != ''
             )
             SELECT tag, COUNT(*) as count FROM split_tags WHERE tag != '' GROUP BY tag ORDER BY count DESC LIMIT 10
-          `).all(),
+          `,
+            )
+            .all(),
           // Oldest memory
-          db.prepare("SELECT created_at FROM memories ORDER BY created_at ASC LIMIT 1").first(),
+          db
+            .prepare(
+              "SELECT created_at FROM memories ORDER BY created_at ASC LIMIT 1",
+            )
+            .first(),
           // Newest memory
-          db.prepare("SELECT created_at FROM memories ORDER BY created_at DESC LIMIT 1").first(),
+          db
+            .prepare(
+              "SELECT created_at FROM memories ORDER BY created_at DESC LIMIT 1",
+            )
+            .first(),
           // Last activity per source
-          db.prepare(`
+          db
+            .prepare(
+              `
             SELECT source, MAX(created_at) as last_active, COUNT(*) as total
             FROM memories GROUP BY source ORDER BY last_active DESC
-          `).all(),
+          `,
+            )
+            .all(),
           // Memory creation timeline (last 7 days, grouped by day)
-          db.prepare(`
+          db
+            .prepare(
+              `
             SELECT date(created_at) as day, COUNT(*) as count
             FROM memories
             WHERE created_at > datetime('now', '-7 days')
             GROUP BY date(created_at)
             ORDER BY day ASC
-          `).all(),
+          `,
+            )
+            .all(),
         ]);
 
         // Estimate storage (rough: avg 200 bytes per memory row)
-        const totalMemories = (memoryCounts as Record<string, unknown>)?.count as number || 0;
+        const totalMemories =
+          ((memoryCounts as Record<string, unknown>)?.count as number) || 0;
         const estimatedStorageMB = (totalMemories * 200) / (1024 * 1024);
         const d1FreeLimitMB = 5 * 1024; // 5GB in MB
-        const storagePercent = ((estimatedStorageMB / d1FreeLimitMB) * 100).toFixed(4);
+        const storagePercent = (
+          (estimatedStorageMB / d1FreeLimitMB) *
+          100
+        ).toFixed(4);
 
-        const activeProjects = (projectCounts.results || []).find((r: Record<string, unknown>) => r.status === "active");
-        const archivedProjects = (projectCounts.results || []).find((r: Record<string, unknown>) => r.status === "archived");
+        const activeProjects = (projectCounts.results || []).find(
+          (r: Record<string, unknown>) => r.status === "active",
+        );
+        const archivedProjects = (projectCounts.results || []).find(
+          (r: Record<string, unknown>) => r.status === "archived",
+        );
 
         // Build structured JSON for Claude to visualize
         const stats = {
           summary: {
             total_memories: totalMemories,
-            total_projects_active: (activeProjects as Record<string, unknown>)?.count || 0,
-            total_projects_archived: (archivedProjects as Record<string, unknown>)?.count || 0,
-            total_instructions: (instructionCount as Record<string, unknown>)?.count || 0,
-            total_identity_fields: (identityCount as Record<string, unknown>)?.count || 0,
-            total_context_logs: (contextLogCount as Record<string, unknown>)?.count || 0,
+            total_projects_active:
+              (activeProjects as Record<string, unknown>)?.count || 0,
+            total_projects_archived:
+              (archivedProjects as Record<string, unknown>)?.count || 0,
+            total_instructions:
+              (instructionCount as Record<string, unknown>)?.count || 0,
+            total_identity_fields:
+              (identityCount as Record<string, unknown>)?.count || 0,
+            total_context_logs:
+              (contextLogCount as Record<string, unknown>)?.count || 0,
           },
-          memories_by_category: (memoryByCategory.results || []).map((r: Record<string, unknown>) => ({
-            category: r.category,
-            count: r.count,
-          })),
-          memories_by_source: (memoryBySource.results || []).map((r: Record<string, unknown>) => ({
-            source: r.source,
-            count: r.count,
-          })),
+          memories_by_category: (memoryByCategory.results || []).map(
+            (r: Record<string, unknown>) => ({
+              category: r.category,
+              count: r.count,
+            }),
+          ),
+          memories_by_source: (memoryBySource.results || []).map(
+            (r: Record<string, unknown>) => ({
+              source: r.source,
+              count: r.count,
+            }),
+          ),
           activity: {
-            last_24h: (recentActivity24h as Record<string, unknown>)?.count || 0,
+            last_24h:
+              (recentActivity24h as Record<string, unknown>)?.count || 0,
             last_7d: (recentActivity7d as Record<string, unknown>)?.count || 0,
-            last_30d: (recentActivity30d as Record<string, unknown>)?.count || 0,
+            last_30d:
+              (recentActivity30d as Record<string, unknown>)?.count || 0,
           },
-          timeline_7d: (memoryTimeline.results || []).map((r: Record<string, unknown>) => ({
-            day: r.day,
-            count: r.count,
-          })),
-          top_tags: (topTags.results || []).map((r: Record<string, unknown>) => ({
-            tag: r.tag,
-            count: r.count,
-          })),
-          source_activity: (lastActivityBySource.results || []).map((r: Record<string, unknown>) => ({
-            source: r.source,
-            last_active: r.last_active,
-            total_memories: r.total,
-          })),
+          timeline_7d: (memoryTimeline.results || []).map(
+            (r: Record<string, unknown>) => ({
+              day: r.day,
+              count: r.count,
+            }),
+          ),
+          top_tags: (topTags.results || []).map(
+            (r: Record<string, unknown>) => ({
+              tag: r.tag,
+              count: r.count,
+            }),
+          ),
+          source_activity: (lastActivityBySource.results || []).map(
+            (r: Record<string, unknown>) => ({
+              source: r.source,
+              last_active: r.last_active,
+              total_memories: r.total,
+            }),
+          ),
           date_range: {
-            oldest_memory: (oldestMemory as Record<string, unknown>)?.created_at || null,
-            newest_memory: (newestMemory as Record<string, unknown>)?.created_at || null,
+            oldest_memory:
+              (oldestMemory as Record<string, unknown>)?.created_at || null,
+            newest_memory:
+              (newestMemory as Record<string, unknown>)?.created_at || null,
           },
           storage: {
             estimated_mb: Number(estimatedStorageMB.toFixed(2)),
@@ -1651,7 +1961,7 @@ Use plenty of color, whitespace, and visual hierarchy. Think of it as a clean, m
             },
           ],
         };
-      }
+      },
     );
   }
 }
@@ -1670,21 +1980,25 @@ const mcpHandler = ContextHub.serve("/mcp", {
 });
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
     const url = new URL(request.url);
 
     // Health check
     if (url.pathname === "/" || url.pathname === "/health") {
       return new Response(
         JSON.stringify({
-          name: "Claude Context Hub",
+          name: "Context Hub",
           version: "0.1.0",
           status: "ok",
           endpoints: ["/mcp"],
         }),
         {
           headers: { "Content-Type": "application/json" },
-        }
+        },
       );
     }
 
