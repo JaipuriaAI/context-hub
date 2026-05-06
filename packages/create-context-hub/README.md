@@ -2,9 +2,9 @@
 
 [![npm version](https://img.shields.io/npm/v/create-context-hub)](https://www.npmjs.com/package/create-context-hub)
 [![npm downloads](https://img.shields.io/npm/dm/create-context-hub)](https://npm-stat.com/charts.html?package=create-context-hub)
-[![license](https://img.shields.io/npm/l/create-context-hub)](https://github.com/mayankbohra/claude-context-hub/blob/main/LICENSE)
+[![license](https://img.shields.io/npm/l/create-context-hub)](https://github.com/JaipuriaAI/context-hub/blob/main/LICENSE)
 
-Set up a [Context Hub](https://github.com/mayankbohra/claude-context-hub) in one command. No cloning, no manual config, no guesswork.
+Set up a [Context Hub](https://github.com/JaipuriaAI/context-hub) in one command. No cloning, no manual config, no guesswork.
 
 ```bash
 npx create-context-hub
@@ -209,7 +209,7 @@ If you prefer not to use the `update` command, you can pull the latest `src/inde
 
 ## Related
 
-- [claude-context-hub](https://github.com/mayankbohra/claude-context-hub) — the full project with documentation, tool reference, and comparison with alternatives
+- [context-hub](https://github.com/JaipuriaAI/context-hub) — the full project with documentation, tool reference, and comparison with alternatives
 
 ## License
 
