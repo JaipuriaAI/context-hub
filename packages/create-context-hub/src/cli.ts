@@ -3,8 +3,17 @@
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { execFileSync, spawnSync } from "node:child_process";
-import { cp, readdir, readFile, writeFile, unlink, rename } from "node:fs/promises";
+import {
+  cp,
+  readdir,
+  readFile,
+  writeFile,
+  unlink,
+  rename,
+  copyFile,
+} from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -16,7 +25,7 @@ const TEMPLATES_DIR = resolve(__dirname, "..", "templates", "default");
 function runCommand(
   cmd: string,
   args: string[],
-  cwd?: string
+  cwd?: string,
 ): { success: boolean; output: string } {
   try {
     const output = execFileSync(cmd, args, {
@@ -38,7 +47,7 @@ function runCommand(
 function runCommandLive(
   cmd: string,
   args: string[],
-  cwd?: string
+  cwd?: string,
 ): { success: boolean; output: string } {
   try {
     const result = spawnSync(cmd, args, {
@@ -67,7 +76,7 @@ function parseDeployUrl(output: string): string | null {
 
 async function processTemplates(
   targetDir: string,
-  replacements: Record<string, string>
+  replacements: Record<string, string>,
 ): Promise<void> {
   const entries = await readdir(targetDir, {
     recursive: true,
@@ -90,16 +99,16 @@ async function processTemplates(
   }
 }
 
-async function main(): Promise<void> {
+async function scaffold(firstArg: string | undefined): Promise<void> {
   p.intro(pc.bgCyan(pc.black(" create-context-hub ")));
 
   p.log.info(
-    `Your personal AI context layer — bridging Claude.ai, Claude Code, and the Claude App.\n` +
-      `${pc.dim("Runs on Cloudflare Workers (free tier). Costs $0/month.")}`
+    `Your personal AI context layer — shared across any MCP client (Claude, ChatGPT, Perplexity, Cursor, and more).\n` +
+      `${pc.dim("Runs on Cloudflare Workers (free tier). Costs $0/month.")}`,
   );
 
   // Step 1: Project name
-  const argName = process.argv[2];
+  const argName = firstArg;
   let projectName: string;
 
   if (argName && !argName.startsWith("-")) {
@@ -153,7 +162,7 @@ async function main(): Promise<void> {
   const installResult = runCommandLive("npm", ["install"], targetDir);
   if (!installResult.success) {
     p.log.warn(
-      `npm install failed. Run manually: ${pc.cyan(`cd ${projectName} && npm install`)}`
+      `npm install failed. Run manually: ${pc.cyan(`cd ${projectName} && npm install`)}`,
     );
   } else {
     p.log.success("Dependencies installed.");
@@ -168,7 +177,7 @@ async function main(): Promise<void> {
   if (p.isCancel(setupCloudflare) || !setupCloudflare) {
     printManualSteps(projectName);
     p.outro(
-      pc.green("Project created! Follow the steps above to finish setup.")
+      pc.green("Project created! Follow the steps above to finish setup."),
     );
     process.exit(0);
   }
@@ -188,11 +197,11 @@ async function main(): Promise<void> {
     if (!loginResult.success) {
       p.log.error("Cloudflare login failed.");
       p.log.warn(
-        `Run manually: ${pc.cyan(`cd ${projectName} && npx wrangler login`)}`
+        `Run manually: ${pc.cyan(`cd ${projectName} && npx wrangler login`)}`,
       );
       printManualSteps(projectName, "login");
       p.outro(
-        pc.yellow("Fix the login issue and continue with the steps above.")
+        pc.yellow("Fix the login issue and continue with the steps above."),
       );
       process.exit(1);
     }
@@ -207,13 +216,13 @@ async function main(): Promise<void> {
   const dbResult = runCommand(
     "npx",
     ["wrangler", "d1", "create", dbName],
-    targetDir
+    targetDir,
   );
   if (!dbResult.success) {
     dbSpinner.stop(pc.red("Failed to create D1 database."));
     p.log.error(dbResult.output);
     p.log.warn(
-      `Run manually: ${pc.cyan(`cd ${projectName} && npx wrangler d1 create ${dbName}`)}`
+      `Run manually: ${pc.cyan(`cd ${projectName} && npx wrangler d1 create ${dbName}`)}`,
     );
     printManualSteps(projectName, "db");
     p.outro(pc.yellow("Fix the issue and continue with the steps above."));
@@ -223,10 +232,10 @@ async function main(): Promise<void> {
   const databaseId = parseDatabaseId(dbResult.output);
   if (!databaseId) {
     dbSpinner.stop(
-      pc.yellow("Database created but couldn't parse database_id.")
+      pc.yellow("Database created but couldn't parse database_id."),
     );
     p.log.warn(
-      "Check the output above and manually update wrangler.json with the database_id."
+      "Check the output above and manually update wrangler.json with the database_id.",
     );
     p.log.message(dbResult.output);
   } else {
@@ -251,11 +260,11 @@ async function main(): Promise<void> {
       "--remote",
       "--file=./migrations/0001_init.sql",
     ],
-    targetDir
+    targetDir,
   );
   if (!migrateResult.success) {
     p.log.warn(
-      `Migration failed. Run manually: ${pc.cyan(`cd ${projectName} && npx wrangler d1 execute ${dbName} --remote --file=./migrations/0001_init.sql`)}`
+      `Migration failed. Run manually: ${pc.cyan(`cd ${projectName} && npx wrangler d1 execute ${dbName} --remote --file=./migrations/0001_init.sql`)}`,
     );
   } else {
     p.log.success("Database migration complete.");
@@ -264,16 +273,12 @@ async function main(): Promise<void> {
   // Step 8: Deploy
   p.log.step("Deploying to Cloudflare Workers...");
 
-  const deployResult = runCommand(
-    "npx",
-    ["wrangler", "deploy"],
-    targetDir
-  );
+  const deployResult = runCommand("npx", ["wrangler", "deploy"], targetDir);
   let deployedUrl: string | null = null;
 
   if (!deployResult.success) {
     p.log.warn(
-      `Deploy failed. Run manually: ${pc.cyan(`cd ${projectName} && npx wrangler deploy`)}`
+      `Deploy failed. Run manually: ${pc.cyan(`cd ${projectName} && npx wrangler deploy`)}`,
     );
   } else {
     deployedUrl = parseDeployUrl(deployResult.output);
@@ -306,13 +311,13 @@ async function main(): Promise<void> {
           input: apiKey + "\n",
           stdio: ["pipe", "inherit", "inherit"],
           encoding: "utf-8",
-        }
+        },
       );
 
       if (secretResult.status !== 0) {
         p.log.warn(
           `Failed to set API key. Run manually: ${pc.cyan(`cd ${projectName} && npx wrangler secret put API_KEY`)}\n` +
-            `  Then enter your chosen key when prompted.`
+            `  Then enter your chosen key when prompted.`,
         );
         apiKey = null;
       } else {
@@ -354,14 +359,20 @@ async function main(): Promise<void> {
       });
       if (claudeResult.status !== 0) {
         claudeSpinner.stop(
-          pc.yellow("Couldn't configure Claude Code automatically.")
+          pc.yellow("Couldn't configure Claude Code automatically."),
         );
-        const cmdParts = [`claude mcp add \\`, `  --transport http \\`, `  --scope user \\`];
+        const cmdParts = [
+          `claude mcp add \\`,
+          `  --transport http \\`,
+          `  --scope user \\`,
+        ];
         if (apiKey) {
           cmdParts.push(`  --header "Authorization: Bearer ${apiKey}" \\`);
         }
         cmdParts.push(`  context-hub \\`, `  ${mcpUrl}`);
-        p.log.warn(`Run manually:\n${cmdParts.map((l) => `  ${pc.cyan(l)}`).join("\n")}`);
+        p.log.warn(
+          `Run manually:\n${cmdParts.map((l) => `  ${pc.cyan(l)}`).join("\n")}`,
+        );
       } else {
         claudeSpinner.stop("Claude Code connected.");
       }
@@ -377,7 +388,7 @@ async function main(): Promise<void> {
           ? `  4. Click Advanced settings → add header:\n` +
             `     ${pc.dim("Authorization")}: ${pc.dim(`Bearer ${apiKey}`)}\n`
           : "") +
-        `  ${apiKey ? "5" : "4"}. Click ${pc.bold("Add")} → ${pc.bold("Connect")}`
+        `  ${apiKey ? "5" : "4"}. Click ${pc.bold("Add")} → ${pc.bold("Connect")}`,
     );
   }
 
@@ -389,28 +400,22 @@ async function main(): Promise<void> {
   ];
 
   if (deployedUrl) {
+    summaryLines.push(`  ${pc.green("✓")} URL:      ${pc.cyan(deployedUrl)}`);
     summaryLines.push(
-      `  ${pc.green("✓")} URL:      ${pc.cyan(deployedUrl)}`
-    );
-    summaryLines.push(
-      `  ${pc.green("✓")} MCP:      ${pc.cyan(deployedUrl + "/mcp")}`
+      `  ${pc.green("✓")} MCP:      ${pc.cyan(deployedUrl + "/mcp")}`,
     );
   }
 
   if (apiKey) {
-    summaryLines.push(
-      `  ${pc.green("✓")} API Key:  ${pc.cyan(apiKey)}`
-    );
-    summaryLines.push(
-      `    ${pc.dim("(save this — it won't be shown again)")}`
-    );
+    summaryLines.push(`  ${pc.green("✓")} API Key:  ${pc.cyan(apiKey)}`);
+    summaryLines.push(`    ${pc.dim("(save this — it won't be shown again)")}`);
   }
 
   p.log.message(summaryLines.join("\n"));
 
   p.outro(
     pc.green("Your Context Hub is live!") +
-      pc.dim(" Run `get_full_context` in Claude to verify.")
+      pc.dim(" Run `get_full_context` in Claude to verify."),
   );
 }
 
@@ -424,19 +429,433 @@ function printManualSteps(projectName: string, from?: string): void {
   }
   if (!from || from === "login" || from === "db") {
     steps.push(
-      `  ${n++}. ${pc.cyan(`npx wrangler d1 create ${projectName}-db`)}`
+      `  ${n++}. ${pc.cyan(`npx wrangler d1 create ${projectName}-db`)}`,
     );
     steps.push(
-      `  ${n++}. Update ${pc.bold("wrangler.json")} with the database_id from the output`
+      `  ${n++}. Update ${pc.bold("wrangler.json")} with the database_id from the output`,
     );
     steps.push(
-      `  ${n++}. ${pc.cyan(`npx wrangler d1 execute ${projectName}-db --remote --file=./migrations/0001_init.sql`)}`
+      `  ${n++}. ${pc.cyan(`npx wrangler d1 execute ${projectName}-db --remote --file=./migrations/0001_init.sql`)}`,
     );
     steps.push(`  ${n++}. ${pc.cyan("npx wrangler deploy")}`);
   }
 
   p.log.step(pc.bold("Remaining steps:"));
   p.log.message(steps.join("\n"));
+}
+
+function printUsage(): void {
+  console.log(
+    `\n${pc.bold("create-context-hub")} — scaffold, update, or locate a Context Hub MCP server.\n\n` +
+      `${pc.bold("Usage:")}\n` +
+      `  ${pc.cyan("npx create-context-hub")} [project-name]   Scaffold a new hub (interactive)\n` +
+      `  ${pc.cyan("npx create-context-hub update")}           Update an existing hub to the latest template\n` +
+      `  ${pc.cyan("npx create-context-hub locate")}           Find Context Hub projects on this machine\n` +
+      `  ${pc.cyan("npx create-context-hub --help")}           Show this help\n\n` +
+      `${pc.bold("Examples:")}\n` +
+      `  ${pc.dim("# Fresh scaffold, prompts for project name")}\n` +
+      `  ${pc.cyan("npx create-context-hub")}\n\n` +
+      `  ${pc.dim("# Fresh scaffold with explicit name")}\n` +
+      `  ${pc.cyan("npx create-context-hub my-hub")}\n\n` +
+      `  ${pc.dim("# Update an existing project (run from inside the project directory)")}\n` +
+      `  ${pc.cyan("cd my-hub && npx create-context-hub@latest update")}\n\n` +
+      `  ${pc.dim("# Forgot where your hub lives? Scan common directories:")}\n` +
+      `  ${pc.cyan("npx create-context-hub@latest locate")}\n`,
+  );
+}
+
+// Directories to skip while walking the filesystem.
+const LOCATE_SKIP = new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  ".next",
+  ".turbo",
+  ".cache",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".DS_Store",
+  "Library",
+  "Applications",
+  ".Trash",
+]);
+
+const LOCATE_MAX_DEPTH = 4;
+
+interface HubMatch {
+  path: string;
+  workerName: string | null;
+  databaseName: string | null;
+  databaseId: string | null;
+}
+
+async function findHubsInDir(
+  root: string,
+  maxDepth: number,
+): Promise<HubMatch[]> {
+  const matches: HubMatch[] = [];
+
+  async function walk(dir: string, depth: number): Promise<void> {
+    if (depth > maxDepth) return;
+
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return; // permission denied, symlink loop, etc. — skip silently
+    }
+
+    // Check whether this directory is a Context Hub project.
+    const hasWrangler = entries.some(
+      (e) => e.isFile() && e.name === "wrangler.json",
+    );
+    if (hasWrangler) {
+      const match = await identifyHub(dir);
+      if (match) {
+        matches.push(match);
+        return; // don't recurse into a hub directory
+      }
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (LOCATE_SKIP.has(entry.name)) continue;
+      if (entry.name.startsWith(".")) continue;
+      await walk(join(dir, entry.name), depth + 1);
+    }
+  }
+
+  await walk(root, 0);
+  return matches;
+}
+
+async function identifyHub(dir: string): Promise<HubMatch | null> {
+  // Fingerprint: wrangler.json + src/index.ts + migrations/0001_init.sql,
+  // plus wrangler.json references a CONTEXT_HUB durable object or a context-hub-like DB.
+  const srcExists = existsSync(join(dir, "src", "index.ts"));
+  const migrationExists = existsSync(join(dir, "migrations", "0001_init.sql"));
+  if (!srcExists || !migrationExists) return null;
+
+  let content: string;
+  try {
+    content = await readFile(join(dir, "wrangler.json"), "utf-8");
+  } catch {
+    return null;
+  }
+
+  if (!/CONTEXT_HUB|context-hub/i.test(content)) return null;
+
+  // Parse wrangler.json — it's json-with-comments, so strip simple // and /* */ comments.
+  const cleaned = content
+    .replace(/\/\/[^\n]*/g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+
+  let parsed: {
+    name?: string;
+    d1_databases?: Array<{ database_name?: string; database_id?: string }>;
+  } = {};
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    // Non-fatal — return what we can.
+  }
+
+  return {
+    path: dir,
+    workerName: parsed.name ?? null,
+    databaseName: parsed.d1_databases?.[0]?.database_name ?? null,
+    databaseId: parsed.d1_databases?.[0]?.database_id ?? null,
+  };
+}
+
+async function locateProjects(): Promise<void> {
+  p.intro(pc.bgCyan(pc.black(" create-context-hub locate ")));
+
+  const home = homedir();
+  const cwd = process.cwd();
+
+  // Search roots in priority order. De-dupe.
+  const rawRoots = [
+    cwd,
+    join(home, "Documents"),
+    join(home, "Projects"),
+    join(home, "code"),
+    join(home, "Code"),
+    join(home, "dev"),
+    join(home, "Developer"),
+    join(home, "workspace"),
+    join(home, "src"),
+    home,
+  ];
+  const seenRoots = new Set<string>();
+  const roots: string[] = [];
+  for (const r of rawRoots) {
+    if (!existsSync(r)) continue;
+    if (seenRoots.has(r)) continue;
+    seenRoots.add(r);
+    roots.push(r);
+  }
+
+  const spinner = p.spinner();
+  spinner.start(`Scanning ${roots.length} common locations...`);
+
+  const allMatches: HubMatch[] = [];
+  const seenPaths = new Set<string>();
+
+  for (const root of roots) {
+    // Shallower search for $HOME to avoid walking Photos/Music/etc.
+    const depth = root === home ? 2 : LOCATE_MAX_DEPTH;
+    const found = await findHubsInDir(root, depth);
+    for (const match of found) {
+      if (seenPaths.has(match.path)) continue;
+      seenPaths.add(match.path);
+      allMatches.push(match);
+    }
+  }
+
+  spinner.stop(
+    allMatches.length === 0
+      ? "No hubs found in common locations."
+      : `Found ${allMatches.length} Context Hub ${allMatches.length === 1 ? "project" : "projects"}.`,
+  );
+
+  if (allMatches.length === 0) {
+    p.log.info(`Searched:\n${roots.map((r) => `  ${pc.dim(r)}`).join("\n")}`);
+    p.log.info(
+      `\nTry a manual search if your hub is in an unusual location:\n` +
+        `  ${pc.cyan(
+          `find ~ -name "wrangler.json" -not -path "*/node_modules/*" -exec grep -l "CONTEXT_HUB" {} \\; 2>/dev/null`,
+        )}\n\n` +
+        `Or check your Cloudflare dashboard: ${pc.cyan("dash.cloudflare.com/?to=/:account/workers")}`,
+    );
+    p.outro(pc.yellow("No projects found."));
+    return;
+  }
+
+  p.log.step(pc.bold("Found:"));
+  for (let i = 0; i < allMatches.length; i++) {
+    const m = allMatches[i];
+    const lines = [`  ${pc.cyan(`[${i + 1}]`)} ${pc.bold(m.path)}`];
+    if (m.workerName) {
+      lines.push(`      Worker:   ${pc.green(m.workerName)}`);
+    }
+    if (m.databaseName) {
+      lines.push(
+        `      D1 Name:  ${pc.green(m.databaseName)}${
+          m.databaseId ? pc.dim(` (${m.databaseId})`) : ""
+        }`,
+      );
+    }
+    p.log.message(lines.join("\n"));
+  }
+
+  p.log.info(
+    `\n${pc.bold("Next steps:")}\n` +
+      `  ${pc.dim("# Update any of these to the latest template")}\n` +
+      `  ${pc.cyan(`cd ${allMatches[0].path}`)}\n` +
+      `  ${pc.cyan("npx create-context-hub@latest update")}\n\n` +
+      `  ${pc.dim("# Deploy changes to Cloudflare")}\n` +
+      `  ${pc.cyan("npx wrangler deploy")}`,
+  );
+
+  p.outro(pc.green("Done."));
+}
+
+async function updateProject(): Promise<void> {
+  p.intro(pc.bgCyan(pc.black(" create-context-hub update ")));
+
+  const cwd = process.cwd();
+
+  // Detect whether we're in a scaffolded Context Hub project.
+  const wranglerPath = join(cwd, "wrangler.json");
+  const indexPath = join(cwd, "src", "index.ts");
+  const migrationPath = join(cwd, "migrations", "0001_init.sql");
+
+  const missing: string[] = [];
+  if (!existsSync(wranglerPath)) missing.push("wrangler.json");
+  if (!existsSync(indexPath)) missing.push("src/index.ts");
+  if (!existsSync(migrationPath)) missing.push("migrations/0001_init.sql");
+
+  if (missing.length > 0) {
+    p.log.error(
+      `This doesn't look like a Context Hub project. Missing: ${missing.join(", ")}`,
+    );
+    p.log.info(
+      `Run ${pc.cyan("npx create-context-hub update")} from inside a project scaffolded by this CLI.`,
+    );
+    p.outro(pc.yellow("Update cancelled."));
+    process.exit(1);
+  }
+
+  // Load CLI version for reporting.
+  let cliVersion = "unknown";
+  try {
+    const ownPkg = JSON.parse(
+      await readFile(resolve(__dirname, "..", "package.json"), "utf-8"),
+    );
+    cliVersion = ownPkg.version ?? "unknown";
+  } catch {
+    // non-fatal
+  }
+
+  p.log.info(
+    `Updating to the ${pc.cyan(`create-context-hub@${cliVersion}`)} template.\n` +
+      `${pc.dim("Your wrangler.json, package.json, and custom files are preserved.")}`,
+  );
+
+  // Compare template source to user's source to see what's actually changing.
+  const templateIndexPath = join(TEMPLATES_DIR, "src", "index.ts");
+  const templateMigrationPath = join(
+    TEMPLATES_DIR,
+    "migrations",
+    "0001_init.sql",
+  );
+
+  const [userIndex, templateIndex, userMigration, templateMigration] =
+    await Promise.all([
+      readFile(indexPath, "utf-8"),
+      readFile(templateIndexPath, "utf-8"),
+      readFile(migrationPath, "utf-8"),
+      readFile(templateMigrationPath, "utf-8"),
+    ]);
+
+  const indexChanged = userIndex !== templateIndex;
+  const migrationChanged = userMigration !== templateMigration;
+
+  if (!indexChanged && !migrationChanged) {
+    p.outro(pc.green("Already up to date — nothing to change."));
+    return;
+  }
+
+  // Summarize what will change.
+  const changes: string[] = [];
+  if (indexChanged) {
+    const diff = lineDiffSummary(userIndex, templateIndex);
+    changes.push(
+      `  ${pc.yellow("~")} src/index.ts              ${pc.dim(`(${diff})`)}`,
+    );
+  }
+  if (migrationChanged) {
+    const diff = lineDiffSummary(userMigration, templateMigration);
+    changes.push(
+      `  ${pc.yellow("~")} migrations/0001_init.sql  ${pc.dim(`(${diff})`)}`,
+    );
+  }
+  p.log.step(pc.bold("Files that will be updated:"));
+  p.log.message(changes.join("\n"));
+
+  if (migrationChanged) {
+    p.log.info(
+      `${pc.dim("Note: the migration file is safe to overwrite — the schema is comment-only compatible across 0.1.x → 0.2.x.")}`,
+    );
+  }
+
+  const proceed = await p.confirm({
+    message:
+      "Backup (.bak) will be written next to each file. Proceed with update?",
+    initialValue: true,
+  });
+  if (p.isCancel(proceed) || !proceed) {
+    p.outro(pc.yellow("Update cancelled. No changes made."));
+    return;
+  }
+
+  // Write backups then overwrite.
+  const backupSpinner = p.spinner();
+  backupSpinner.start("Backing up existing files...");
+  if (indexChanged) {
+    await copyFile(indexPath, `${indexPath}.bak`);
+  }
+  if (migrationChanged) {
+    await copyFile(migrationPath, `${migrationPath}.bak`);
+  }
+  backupSpinner.stop("Backups written (.bak files).");
+
+  const writeSpinner = p.spinner();
+  writeSpinner.start("Applying template updates...");
+  if (indexChanged) {
+    await writeFile(indexPath, templateIndex, "utf-8");
+  }
+  if (migrationChanged) {
+    await writeFile(migrationPath, templateMigration, "utf-8");
+  }
+  writeSpinner.stop("Template files updated.");
+
+  // Offer to redeploy.
+  const deploy = await p.confirm({
+    message: "Redeploy to Cloudflare Workers now?",
+    initialValue: true,
+  });
+  if (p.isCancel(deploy) || !deploy) {
+    p.log.info(`Deploy when ready: ${pc.cyan("npx wrangler deploy")}`);
+    p.outro(
+      pc.green("Update applied.") +
+        pc.dim(
+          " Backups saved as src/index.ts.bak and migrations/0001_init.sql.bak.",
+        ),
+    );
+    return;
+  }
+
+  p.log.step("Deploying to Cloudflare Workers...");
+  const deployResult = runCommandLive("npx", ["wrangler", "deploy"], cwd);
+  if (!deployResult.success) {
+    p.log.warn(
+      `Deploy failed. Run manually: ${pc.cyan("npx wrangler deploy")}`,
+    );
+    p.log.info(
+      `${pc.dim("If something went wrong, restore backups:")}\n` +
+        `  ${pc.cyan("mv src/index.ts.bak src/index.ts")}\n` +
+        `  ${pc.cyan("mv migrations/0001_init.sql.bak migrations/0001_init.sql")}`,
+    );
+    p.outro(
+      pc.yellow("Deploy step failed — files are already updated on disk."),
+    );
+    return;
+  }
+
+  p.log.success("Redeployed.");
+  p.log.info(
+    `${pc.dim("Your MCP clients pick up the new tool schemas on their next conversation.")}\n` +
+      `${pc.dim("In Claude Code, run /mcp to refresh immediately.")}`,
+  );
+  p.outro(
+    pc.green("Update complete.") +
+      pc.dim(" Remove .bak files once you've verified everything works."),
+  );
+}
+
+function lineDiffSummary(oldContent: string, newContent: string): string {
+  const oldLines = oldContent.split("\n").length;
+  const newLines = newContent.split("\n").length;
+  const delta = newLines - oldLines;
+  if (delta === 0) return `~${oldLines} lines, in-place changes`;
+  const sign = delta > 0 ? "+" : "";
+  return `${sign}${delta} lines (${oldLines} → ${newLines})`;
+}
+
+async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+  const first = argv[0];
+
+  if (first === "--help" || first === "-h" || first === "help") {
+    printUsage();
+    return;
+  }
+
+  if (first === "update") {
+    await updateProject();
+    return;
+  }
+
+  if (first === "locate" || first === "list" || first === "ls") {
+    await locateProjects();
+    return;
+  }
+
+  await scaffold(first);
 }
 
 main().catch((err) => {
