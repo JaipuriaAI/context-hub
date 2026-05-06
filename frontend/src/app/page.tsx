@@ -107,21 +107,27 @@ const features = [
 
 const useCases = [
   {
+    title: "Own your AI memory before a vendor wipes it for you",
+    kicker: "Sovereignty",
+    href: "/use-cases/own-your-ai-memory",
+    body: "ChatGPT lost users' saved memories twice in 2025. Hosted AI memory is rented, not owned. Here's what changes when the rows live in your account, not theirs.",
+  },
+  {
     title: "Sync Claude.ai memories into Claude Code",
     kicker: "Workflow",
-    href: "#use-cases",
+    href: "/use-cases/sync-claude-to-claude-code",
     body: "Save a product decision in the browser, then ask your terminal agent to use that same context while editing code.",
   },
   {
     title: "Build a personal MCP memory server for $0/month",
     kicker: "Infrastructure",
-    href: "#use-cases",
+    href: "/use-cases/personal-mcp-memory-server",
     body: "Deploy a durable AI context layer on Cloudflare Workers and D1 without paying for a hosted memory product.",
   },
   {
     title: "Share context between ChatGPT, Perplexity, and Cursor",
     kicker: "Multi-client",
-    href: "#use-cases",
+    href: "/use-cases/share-context-multi-client",
     body: "Use Context Hub as the bridge when research, planning, and implementation happen in different AI tools.",
   },
 ];
@@ -144,9 +150,7 @@ export default async function Home() {
               </span>
             </a>
             <div className="nav-links">
-              <a href="#features">Docs</a>
-              <a href="#use-cases">Guide</a>
-              <a href="#use-cases">Templates</a>
+              <a href="/use-cases">Use cases</a>
               <a href="https://github.com/JaipuriaAI/context-hub">GitHub ↗</a>
               <a
                 className="get-started"
@@ -444,7 +448,7 @@ export default async function Home() {
               the same source of truth.
             </p>
           </div>
-          <div className="mt-14 grid gap-5 lg:grid-cols-3">
+          <div className="mt-14 grid gap-5 md:grid-cols-2 lg:grid-cols-2">
             {useCases.map((useCase, index) => (
               <a
                 className="use-case-card"
