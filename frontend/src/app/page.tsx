@@ -138,7 +138,10 @@ export default async function Home() {
           <nav className="hero-nav">
             <a href="#" className="brand-mark" aria-label="Context Hub home">
               <span className="brand-prompt">&gt;_</span>
-              <span>Context Hub</span>
+              <span className="brand-wordmark">
+                <span className="brand-wordmark-strong">Context</span>
+                <span className="brand-wordmark-light">Hub</span>
+              </span>
             </a>
             <div className="nav-links">
               <a href="#features">Docs</a>
@@ -159,7 +162,8 @@ export default async function Home() {
               <h1>
                 Your AI context.
                 <br />
-                Connected <span>everywhere.</span>
+                Connected{" "}
+                <span className="rainbow-gradient-text">everywhere.</span>
               </h1>
               <p>
                 Context Hub is your personal context layer and signal console.
@@ -237,27 +241,33 @@ export default async function Home() {
                 </defs>
                 <path
                   d="M170 95 C240 95 290 165 340 165"
-                  stroke="url(#lineL)"
+                  stroke="#9677f8"
+                  className="map-line"
                 />
                 <path
                   d="M170 205 C240 205 290 205 340 205"
-                  stroke="url(#lineL)"
+                  stroke="#4e44fd"
+                  className="map-line"
                 />
                 <path
                   d="M170 315 C240 315 290 245 340 245"
-                  stroke="url(#lineL)"
+                  stroke="#ff4859"
+                  className="map-line"
                 />
                 <path
                   d="M420 165 C470 165 520 95 590 95"
-                  stroke="url(#lineR)"
+                  stroke="#9677f8"
+                  className="map-line"
                 />
                 <path
                   d="M420 205 C470 205 520 205 590 205"
-                  stroke="url(#lineR)"
+                  stroke="#4e44fd"
+                  className="map-line"
                 />
                 <path
                   d="M420 245 C470 245 520 315 590 315"
-                  stroke="url(#lineR)"
+                  stroke="#00c483"
+                  className="map-line"
                 />
                 <circle cx="170" cy="95" r="5" />
                 <circle cx="170" cy="205" r="5" />
@@ -468,10 +478,7 @@ export default async function Home() {
             <br />
             to every AI client.
           </h2>
-          <p>
-            One npm command stands up a Cloudflare-backed MCP context layer that
-            every AI client you use can read and write.
-          </p>
+          <p>One command. Every AI tool you use, finally on the same page.</p>
           <CopyInstall command="npx create-context-hub" variant="cta" />
           <div className="cta-actions">
             <a
@@ -491,11 +498,16 @@ export default async function Home() {
       </section>
 
       <footer className="site-footer">
-        <div className="mx-auto flex max-w-7xl flex-col gap-6 px-5 py-12 sm:px-8 lg:flex-row lg:items-start lg:justify-between lg:px-10">
+        {/* Row 1: brand block + link columns. Stacks vertically on mobile,
+            splits into 3 horizontal columns from lg upward. */}
+        <div className="mx-auto flex max-w-7xl flex-col gap-6 px-5 pt-12 pb-8 sm:px-8 lg:flex-row lg:items-start lg:justify-between lg:px-10">
           <div className="footer-brand-block">
             <div className="footer-brand">
               <span className="brand-prompt">&gt;_</span>
-              <span>Context Hub</span>
+              <span className="brand-wordmark">
+                <span className="brand-wordmark-strong">Context</span>
+                <span className="brand-wordmark-light">Hub</span>
+              </span>
             </div>
             <p className="footer-tagline">
               A personal MCP context layer for every AI client you use.
@@ -514,11 +526,41 @@ export default async function Home() {
               <a href="https://www.npmjs.com/package/create-context-hub">npm</a>
             </div>
           </div>
-          <div className="footer-meta">
-            <span>MIT licensed</span>
-            <span aria-hidden="true">·</span>
-            <span>Built on Cloudflare</span>
-          </div>
+        </div>
+
+        {/* Row 2: full-width centered credit line, separated by a hairline
+            border. Lives below the columns so the long-form sentence has the
+            entire viewport width to render on one line at almost all sizes;
+            very narrow phones (≤375px) wrap to two balanced lines via
+            `text-wrap: balance`. Each link span is `white-space: nowrap` so
+            the wrap point can only land BETWEEN words, never mid-link. */}
+        <div className="footer-credit-divider mx-auto max-w-7xl px-5 sm:px-8 lg:px-10">
+          <p className="footer-credit">
+            Built by{" "}
+            <a
+              href="https://mayankbohra.com"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Mayank Bohra
+            </a>{" "}
+            while building{" "}
+            <a
+              href="https://tryrehearsal.ai"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Rehearsal AI
+            </a>{" "}
+            and{" "}
+            <a
+              href="https://highlyt.app"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Highlyt
+            </a>
+          </p>
         </div>
       </footer>
     </main>
