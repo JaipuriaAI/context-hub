@@ -473,6 +473,37 @@ npx wrangler deploy
 
 That's it — all your Claude sessions will see the updated tools immediately.
 
+### Upgrading a project scaffolded via `npx create-context-hub`
+
+If you originally set up your hub with `npx create-context-hub` (rather than cloning this repo), there's a dedicated one-command upgrade path in the CLI:
+
+```bash
+cd your-scaffolded-hub
+npx create-context-hub@latest update
+```
+
+The `update` command:
+
+- Detects your scaffolded project (checks `wrangler.json`, `src/index.ts`, `migrations/0001_init.sql`)
+- Previews which files will change and by how many lines
+- Writes `.bak` backups before overwriting (so rollback is one `mv` away)
+- Preserves your `wrangler.json` (with your database ID), `package.json`, `tsconfig.json`, and any custom files
+- Optionally runs `npx wrangler deploy` for you
+
+Existing memories keep their original `source` values — there's no data migration. New memories written after the upgrade get the calling MCP client's self-reported name as their source (e.g. `claude-code`, `chatgpt`, `perplexity`, `cursor`).
+
+### Forgot where your scaffolded hub lives?
+
+If you scaffolded your hub months ago and can't remember the directory, the CLI can find it for you:
+
+```bash
+npx create-context-hub@latest locate
+```
+
+This scans common project directories (`~/Documents`, `~/Projects`, `~/code`, `~/dev`, `~/Developer`, `~/workspace`, `~/src`, and your `$HOME` shallow) for anything with the Context Hub fingerprint — `wrangler.json` + `src/index.ts` + `migrations/0001_init.sql` + a `CONTEXT_HUB` durable object binding. It prints each project's path, Worker name, and D1 database details.
+
+If that turns up nothing, the Worker name in your [Cloudflare Workers dashboard](https://dash.cloudflare.com/?to=/:account/workers) is the definitive record.
+
 ## Updating Context Hub
 
 ### Adding new tools or updating existing ones

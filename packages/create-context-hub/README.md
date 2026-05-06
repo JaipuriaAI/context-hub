@@ -100,6 +100,16 @@ npx create-context-hub my-hub
 # Scaffold only (skip Cloudflare setup)
 # Answer "No" when prompted for Cloudflare setup
 npx create-context-hub my-hub
+
+# Update an existing hub to the latest template (run from the project directory)
+cd my-hub
+npx create-context-hub@latest update
+
+# Forgot where your hub lives? Scan common directories:
+npx create-context-hub@latest locate
+
+# Help
+npx create-context-hub --help
 ```
 
 ## What Gets Scaffolded
@@ -140,17 +150,62 @@ Once deployed, verify it works from every MCP client you connect:
 
 Each entry is tagged with the `source` of the client that wrote it (`claude-app`, `chatgpt`, `claude-code`, …) — auto-detected from the MCP client's self-reported name.
 
+## Finding your hub
+
+Forgot where you scaffolded your hub? The CLI scans common project directories (`~/Documents`, `~/Projects`, `~/code`, `~/dev`, `~/Developer`, `~/workspace`, `~/src`, cwd, and `~` shallow) for anything with the Context Hub fingerprint (`wrangler.json` + `src/index.ts` + `migrations/0001_init.sql` + `CONTEXT_HUB` durable object binding):
+
+```bash
+npx create-context-hub@latest locate
+```
+
+Example output:
+
+```
+┌   create-context-hub locate
+◇  Found 1 Context Hub project.
+│
+│    [1] /Users/you/Projects/my-hub
+│        Worker:   my-hub
+│        D1 Name:  my-hub-db (0123abcd-...)
+│
+●  Next steps:
+│    cd /Users/you/Projects/my-hub
+│    npx create-context-hub@latest update
+│    npx wrangler deploy
+│
+└  Done.
+```
+
+If it finds nothing, try the manual fallback:
+
+```bash
+# Search anywhere under your home directory
+find ~ -name "wrangler.json" -not -path "*/node_modules/*" -exec grep -l "CONTEXT_HUB" {} \; 2>/dev/null
+```
+
+Or open your [Cloudflare Workers dashboard](https://dash.cloudflare.com/?to=/:account/workers) — the Worker will be listed there under whatever name you scaffolded with.
+
 ## Updating
 
-Your Context Hub is a live MCP server. To update after the main project releases changes:
+Your Context Hub is a live MCP server. The CLI has a built-in `update` command that pulls the latest `src/index.ts` and `migrations/` from the current template, preserving your `wrangler.json` (with your database ID), `package.json`, and any customizations.
 
 ```bash
 cd my-hub
-git pull origin main  # if tracking upstream
-npx wrangler deploy
+npx create-context-hub@latest update
 ```
 
-All connected Claude sessions pick up changes on their next conversation.
+The update flow:
+
+1. Detects that you're in a scaffolded Context Hub project (by checking for `wrangler.json`, `src/index.ts`, `migrations/0001_init.sql`)
+2. Shows you exactly which files will change and the line-count delta
+3. Writes `.bak` copies of files before overwriting (easy rollback)
+4. Optionally runs `npx wrangler deploy` for you
+
+All connected MCP clients pick up the new tool schemas on their next conversation. In Claude Code, run `/mcp` to refresh immediately.
+
+### Manual alternative
+
+If you prefer not to use the `update` command, you can pull the latest `src/index.ts` and `migrations/0001_init.sql` from the repo manually and run `npx wrangler deploy` yourself.
 
 ## Related
 
