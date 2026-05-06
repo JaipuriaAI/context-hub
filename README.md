@@ -165,8 +165,8 @@ That's it. The CLI walks you through everything interactively — scaffolds the 
 ### Step 1: Clone and install
 
 ```bash
-git clone https://github.com/mayankbohra/claude-context-hub.git
-cd claude-context-hub
+git clone https://github.com/JaipuriaAI/context-hub.git
+cd context-hub
 npm install
 ```
 
