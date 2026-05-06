@@ -43,6 +43,10 @@ test-results/
 
 # Plain-text scratch / drafts
 *.txt
+# … but keep source files in the Next.js app directory (e.g. the
+# `llms.txt` route segment, which is a directory named "llms.txt")
+!frontend/src/app/llms.txt/
+!frontend/src/app/llms.txt/**
 
 # TypeScript / Next.js generated
 *.tsbuildinfo
