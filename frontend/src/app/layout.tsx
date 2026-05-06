@@ -1,7 +1,22 @@
 import type { Metadata, Viewport } from "next";
+import { Raleway } from "next/font/google";
 import "./globals.css";
 
-const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? "https://context-hub.dev";
+// Raleway: 200 (extraLight) for "Hub" half of the wordmark + light accents,
+// 400 (regular) for "Context" half + body, 600 (semiBold) for headings,
+// 700 (bold) for hero headlines. Mirrors Rehearsal's brand DNA weight system.
+const raleway = Raleway({
+  subsets: ["latin"],
+  weight: ["200", "400", "600", "700"],
+  variable: "--font-raleway",
+  display: "swap",
+});
+
+// Production canonical URL — used as metadataBase so og:image / twitter:image
+// resolve to absolute URLs scrapers (WhatsApp, X, LinkedIn) can actually fetch.
+// If NEXT_PUBLIC_SITE_URL is set in the deploy env it overrides this fallback.
+const SITE_URL =
+  process.env.NEXT_PUBLIC_SITE_URL ?? "https://contexthub.tryrehearsal.ai";
 const SITE_NAME = "Context Hub";
 const TAGLINE = "Your AI context. Connected everywhere.";
 const DESCRIPTION =
@@ -79,8 +94,8 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   themeColor: [
-    { media: "(prefers-color-scheme: dark)", color: "#060a0c" },
-    { media: "(prefers-color-scheme: light)", color: "#060a0c" },
+    { media: "(prefers-color-scheme: dark)", color: "#0a0a0a" },
+    { media: "(prefers-color-scheme: light)", color: "#0a0a0a" },
   ],
   colorScheme: "dark",
   width: "device-width",
@@ -141,7 +156,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="h-full antialiased" dir="ltr">
+    <html
+      lang="en"
+      className={`h-full antialiased ${raleway.variable}`}
+      dir="ltr"
+    >
       <body className="min-h-full">
         {children}
         {/*
