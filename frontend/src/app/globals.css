@@ -217,8 +217,9 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 2.25rem;
-  height: 2.25rem;
+  width: 2.75rem;
+  height: 2.75rem;
+  flex-shrink: 0;
   border: 1px solid rgba(216, 247, 232, 0.18);
   border-radius: 0.4rem;
   background: rgba(245, 241, 232, 0.04);
@@ -1047,28 +1048,172 @@ button {
     padding: 0;
   }
 
+  /*
+   * Mobile context-map: stack vertically with a visual spine.
+   * Desktop's 6-cards-around-a-center diagram doesn't fit a 412px phone,
+   * so we transform it into:
+   *   1. Central "Context Hub" console (full row)
+   *   2. A vertical cyan spine descending below the console
+   *   3. 6 client cards in a 2×3 grid, each with a connector stub
+   *      pointing to the spine
+   * Visually communicates the same "all clients route through the hub"
+   * relationship as desktop, but readable on mobile.
+   */
   .context-map {
-    min-height: 46rem;
-    overflow: hidden;
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 1.6rem;
+    row-gap: 0.95rem;
+    align-items: stretch;
+    justify-items: stretch;
+    padding: 1.6rem 1.1rem 2.2rem;
+    min-height: auto;
+    max-width: 28rem;
+    margin: 0 auto;
+    overflow: visible;
   }
 
-  .map-lines,
   .map-rings {
-    opacity: 0.55;
+    display: none;
   }
 
+  /* Hide the absolute-positioned desktop SVG path lines on mobile.
+     The cyan spine + per-card stubs replace them. */
+  .map-lines {
+    display: none;
+  }
+
+  /*
+   * Vertical spine: spans the full height of the context-map grid.
+   * Sits behind cards (z-index: 0); cards (z-index: 1) occlude it where
+   * they overlap, so the visible spine appears only in the column-gap
+   * channel between cards and continues into the console row below.
+   * Centered on the grid's column-gap (50% of .context-map padding box).
+   */
+  .context-map::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 1.6rem;
+    bottom: 1.6rem;
+    width: 2px;
+    transform: translateX(-1px);
+    background: linear-gradient(
+      180deg,
+      rgba(85, 216, 231, 0.55) 0%,
+      rgba(85, 216, 231, 0.45) 70%,
+      rgba(85, 216, 231, 0.25) 100%
+    );
+    z-index: 0;
+    pointer-events: none;
+  }
+
+  /* No top anchor dot — each row's shared dot already anchors the spine. */
+  .context-map::after {
+    content: none;
+  }
+
+  /* Console: full-width row above the card grid. */
+  .hub-console {
+    position: static;
+    transform: none;
+    width: 100%;
+    max-width: 22rem;
+    margin: 0 auto;
+    grid-column: 1 / -1;
+    justify-self: center;
+    z-index: 1;
+  }
+
+  /* Cards: stack into the 2-col grid, neutralize all desktop absolute coords. */
   .map-node {
-    min-width: 7rem;
-    min-height: 5.6rem;
+    position: relative;
+    width: 100%;
+    height: auto;
+    min-width: 0;
+    min-height: 5.4rem;
+    padding: 0.85rem 0.6rem;
+    z-index: 1;
   }
 
+  .client-claude,
+  .client-chatgpt,
+  .client-perplexity,
+  .client-cursor,
   .client-claude-code,
   .client-codex {
-    min-width: 8.6rem;
+    left: auto;
+    right: auto;
+    top: auto;
+    bottom: auto;
+    width: 100%;
   }
 
-  .hub-console {
-    width: min(17rem, calc(100% - 2rem));
+  /*
+   * Connector stubs + spine dots — geometry must match the column gap.
+   * The grid uses `column-gap: 1.6rem`, so the central spine sits exactly
+   * at half that gap (0.8rem) outside each card's spine-side edge.
+   * Stubs span the full 0.8rem so they meet on the spine. The single dot
+   * sits at the spine center (0.8rem from each card's edge).
+   *
+   * To prevent two dots stacking, only the LEFT-column card draws the
+   * dot — the right-column card keeps its stub but skips the dot, so
+   * the two stubs visually merge into one continuous line passing
+   * through a single bright endpoint on the spine.
+   */
+  .map-node::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    width: 0.8rem;
+    height: 1px;
+    background: rgba(85, 216, 231, 0.55);
+    pointer-events: none;
+  }
+
+  /* Left-column stub goes from card's right edge to the spine. */
+  .map-node:nth-child(odd)::before {
+    right: -0.8rem;
+  }
+
+  /* Right-column stub goes from card's left edge to the spine. */
+  .map-node:nth-child(even)::before {
+    left: -0.8rem;
+  }
+
+  /* Console isn't a "card" in the spine grid — no stub. */
+  .hub-console::before {
+    display: none;
+  }
+
+  /*
+   * Single shared endpoint dot on the spine, drawn by the left-column card.
+   * Math: spine center is at (card.right_edge + 0.8rem). The dot is 0.5rem
+   * wide; we want its center at that same x. Setting `right: -1.05rem`
+   * places the dot's right edge at card.right_edge + 1.05rem, so its
+   * center sits at card.right_edge + 1.05rem - 0.25rem = card.right_edge
+   * + 0.8rem ✓. No transform needed on the x-axis.
+   */
+  .map-node:nth-child(odd)::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    right: -1.05rem;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--cyan);
+    box-shadow: 0 0 10px rgba(85, 216, 231, 0.95);
+    transform: translateY(-50%);
+    pointer-events: none;
+    z-index: 2;
+  }
+
+  /* Right-column cards: no dot (the left card's dot is the shared anchor). */
+  .map-node:nth-child(even)::after,
+  .hub-console::after {
+    content: none;
   }
 
   .hero-stat-row {
@@ -1090,14 +1235,24 @@ button {
 }
 
 @media (max-width: 480px) {
+  /* Mobile stat layout: 2 columns × 3 rows. Items fill row-by-row, so the
+     two npm stats (last items in the array) naturally land on row 3. */
   .hero-stat-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    row-gap: 0.9rem;
+    column-gap: 0.85rem;
     padding: 1.2rem 1.1rem;
   }
 
-  .hero-stat:nth-child(odd) {
+  .hero-stat {
     border-right: 0;
-    padding-right: 0;
+    padding: 0;
+    min-height: 3rem;
+  }
+
+  .hero-stat:nth-child(odd) {
+    border-right: 1px solid rgba(216, 247, 232, 0.13);
+    padding-right: 0.85rem;
   }
 
   .hero-copy {
@@ -1108,9 +1263,53 @@ button {
     max-width: 100%;
   }
 
+  /* Mobile readability: lift body text to a 12px floor (WCAG / iOS guidance).
+     The desktop 0.63-0.72rem sizes are too small for one-handed reading. */
   .hero-trust {
-    font-size: 0.68rem;
-    gap: 0.45rem;
+    font-size: 0.78rem;
+    gap: 0.5rem;
+  }
+
+  .hero-mini-feature p {
+    font-size: 0.78rem;
+  }
+
+  .hero-mini-feature strong {
+    font-size: 0.86rem;
+  }
+
+  .hero-stat strong {
+    font-size: 0.85rem;
+  }
+
+  .hero-stat p {
+    font-size: 0.76rem;
+  }
+
+  .hub-console p {
+    font-size: 0.7rem;
+  }
+
+  .console-row {
+    font-size: 0.82rem;
+  }
+
+  /* Touch-target minimum 44pt for footer + nav links on mobile */
+  .footer-col a,
+  .footer-links a,
+  .site-footer .footer-col a {
+    padding: 0.6rem 0;
+    line-height: 1.4;
+  }
+
+  .nav-links a {
+    padding: 0.65rem 0;
+    line-height: 1.4;
+  }
+
+  .hero-trust .trust-link {
+    padding: 0.4rem 0;
+    line-height: 1.5;
   }
 }
 
@@ -1227,10 +1426,11 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 2.1rem;
-  height: 2.1rem;
+  width: 2.75rem;
+  height: 2.75rem;
+  flex-shrink: 0;
   border: 1px solid rgba(216, 247, 232, 0.18);
-  border-radius: 0.35rem;
+  border-radius: 0.4rem;
   background: rgba(245, 241, 232, 0.04);
   color: rgba(245, 241, 232, 0.78);
   cursor: pointer;
@@ -1404,9 +1604,55 @@ button {
   }
 }
 
+/*
+ * Mobile + small-tablet trust strip: switch from auto-wrapping flex to an
+ * explicit 2 columns × 3 rows grid. With 6 clients in array order
+ * (Claude / ChatGPT / Perplexity / Cursor / Claude Code / Codex), row-flow
+ * fill puts them as:
+ *   Claude       | ChatGPT
+ *   Perplexity   | Cursor
+ *   Claude Code  | Codex
+ */
 @media (max-width: 720px) {
+  /*
+   * Mobile trust strip: 2 columns × 3 rows, with each cell centered so the
+   * left and right columns mirror each other visually. Without justify-self,
+   * cell content hugs the column's left edge and the row reads as off-center.
+   */
+  .trust-strip-clients {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 1rem;
+    row-gap: 0.7rem;
+    width: 100%;
+    justify-items: center;
+    align-items: center;
+  }
+
   .trust-strip-clients li {
-    font-size: 0.78rem;
+    font-size: 0.82rem;
+    /*
+     * Match the stat row's visual rhythm: all tiles share the same width
+     * (so icons line up vertically per column) and each tile is centered
+     * inside its grid cell. The 8rem floor fits the longest label
+     * ("Claude Code", 118px / 7.4rem) with breathing room.
+     */
+    justify-self: center;
+    width: 8rem;
+    max-width: 100%;
+  }
+
+  /* Center the parent container's section content as well so the grid is
+     visually centered under the "TRUSTED WITH CONTEXT ACROSS" label. */
+  .trust-strip > div {
+    justify-content: center;
+    align-items: center;
+  }
+
+  .trust-strip-label {
+    justify-content: center;
+    text-align: center;
+    width: 100%;
   }
 }
 
