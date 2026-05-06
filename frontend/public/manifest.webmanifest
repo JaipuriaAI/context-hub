@@ -1,0 +1,20 @@
+{
+  "name": "Context Hub",
+  "short_name": "Context Hub",
+  "description": "Your AI context. Connected everywhere. One MCP layer for every AI client you use.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#060a0c",
+  "theme_color": "#060a0c",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["developer", "productivity", "utilities"]
+}
