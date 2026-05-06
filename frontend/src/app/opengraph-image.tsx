@@ -18,15 +18,17 @@ const RAINBOW =
  * Design intent:
  *   - 70% headline-dominated layout (matches tryrehearsal.ai hero)
  *   - Pure #0a0a0a canvas, soft lavender/coral ambient blobs, no grid clutter
- *   - Wordmark (top-left) sits above its own rainbow underline — Rehearsal's
- *     signature trick, mirrored here as Context(600) + Hub(200)
- *   - One headline keyword ("everywhere") in coral; Satori can't render
- *     `background-clip: text` so the rainbow is reserved for stripes/borders
- *   - Rainbow stripes top + bottom frame the card so the brand reads in 1s
- *     even at WhatsApp's ~400px thumbnail
- *   - Trust line ("Free · Open source · MIT") replaces the noisy install pill
- *     — at 400px scale a code snippet becomes illegible, a trust line stays
- *     parseable
+ *   - Wordmark (top-left) sits above its own rainbow underline at proper
+ *     visual weight (~46px) so the brand reads at WhatsApp ~400px thumbnail
+ *   - Headline as 2 controlled lines, NOT relying on flex-wrap (which Satori
+ *     handles inconsistently). Single accent word ("AI tools") in coral.
+ *   - Rainbow stripes top + bottom frame the card
+ *   - Trust line uses chips with separators; install command sits in its own
+ *     faint rainbow-bordered pill so it reads as "thing you can copy" instead
+ *     of just inline text
+ *
+ * Spacing system: explicit vertical rhythm 56 / 88 / 88 / 56 with
+ * justify-content: space-between balancing the 4 zones.
  */
 export default async function OpenGraphImage() {
   return new ImageResponse(
@@ -37,7 +39,7 @@ export default async function OpenGraphImage() {
         display: "flex",
         flexDirection: "column",
         justifyContent: "space-between",
-        padding: "78px 96px",
+        padding: "64px 72px",
         // Pure black canvas + two ambient gradient blobs (lavender top-right,
         // coral bottom-left). Matches the Rehearsal hero atmosphere.
         background:
@@ -61,8 +63,8 @@ export default async function OpenGraphImage() {
         }}
       />
 
-      {/* Rainbow stripe — bottom edge. Frames the card so the brand reads
-            even at 400px thumbnail in WhatsApp/Slack/Discord previews. */}
+      {/* Rainbow stripe — bottom edge. Frames the card so the brand
+            reads even at 400px thumbnail in WhatsApp/Slack/Discord. */}
       <div
         style={{
           position: "absolute",
@@ -75,25 +77,25 @@ export default async function OpenGraphImage() {
         }}
       />
 
-      {/* Brand wordmark with rainbow underline.
-            Composition: prompt-glyph (>_) in lavender, "Context"(600) +
-            "Hub"(200) in white, 2px rainbow underline directly below —
-            Rehearsal's signature wordmark trick adapted for Context Hub. */}
+      {/* ZONE 1 — Brand wordmark with rainbow underline.
+            Sized at ~46px (was 34px) so brand has proper presence vs the
+            88px headline. Underline width is fluid via flexbox alignment,
+            not a fixed pixel value (the previous 260px was eyeballed). */}
       <div
         style={{
           display: "flex",
           flexDirection: "column",
           alignItems: "flex-start",
-          gap: "6px",
+          gap: "10px",
         }}
       >
         <div
           style={{
             display: "flex",
             alignItems: "center",
-            gap: "16px",
-            fontSize: "34px",
-            letterSpacing: "-0.012em",
+            gap: "20px",
+            fontSize: "46px",
+            letterSpacing: "-0.015em",
           }}
         >
           <span
@@ -110,70 +112,68 @@ export default async function OpenGraphImage() {
           <div style={{ display: "flex", color: "#ffffff" }}>
             <span style={{ display: "flex", fontWeight: 600 }}>Context</span>
             <span
-              style={{ display: "flex", fontWeight: 200, marginLeft: "8px" }}
+              style={{
+                display: "flex",
+                fontWeight: 200,
+                marginLeft: "12px",
+              }}
             >
               Hub
             </span>
           </div>
         </div>
-        {/* Rainbow underline — 2px, full width of the wordmark text. */}
+        {/* Rainbow underline — sized to wordmark line width (~360px at 46px font). */}
         <div
           style={{
             display: "flex",
-            height: "2px",
-            width: "260px",
-            marginLeft: "50px",
+            height: "3px",
+            width: "360px",
+            marginLeft: "66px",
             background: RAINBOW,
-            borderRadius: "1px",
+            borderRadius: "2px",
           }}
         />
       </div>
 
-      {/* Headline block — 60% of the canvas, max-width caps line length
-            to ~50ch which reads cleanly at thumbnail scale. */}
+      {/* ZONE 2 — Headline block.
+            Two pre-broken lines as separate divs. NOT flex-wrap, NOT inline
+            spans — Satori inserts visible whitespace between flex children
+            which produced the double-space artifact in v1. Each line is a
+            single string in a single div = one clean line of text. */}
       <div
         style={{
           display: "flex",
           flexDirection: "column",
-          gap: "32px",
-          maxWidth: "1000px",
+          gap: "22px",
+          maxWidth: "1056px",
         }}
       >
         <div
           style={{
-            fontSize: "104px",
+            display: "flex",
+            flexDirection: "column",
+            fontSize: "88px",
             fontWeight: 700,
             lineHeight: 1.02,
             letterSpacing: "-0.025em",
             color: "#ffffff",
-            display: "flex",
-            flexDirection: "column",
           }}
         >
-          <span style={{ display: "flex" }}>Stop re-explaining</span>
-          <span style={{ display: "flex" }}>
-            yourself to every{" "}
-            <span
-              style={{
-                display: "flex",
-                color: "#ff4859",
-                marginLeft: "26px",
-                fontWeight: 700,
-              }}
-            >
-              AI tool.
-            </span>
-          </span>
+          <div style={{ display: "flex" }}>Stop re-explaining yourself</div>
+          <div style={{ display: "flex" }}>
+            <span>to every&nbsp;</span>
+            <span style={{ color: "#ff4859" }}>AI tool.</span>
+          </div>
         </div>
         <div
           style={{
             display: "flex",
-            fontSize: "32px",
+            fontSize: "28px",
             color: "rgba(255,255,255,0.72)",
             lineHeight: 1.4,
-            maxWidth: "880px",
+            maxWidth: "920px",
             fontWeight: 400,
-            letterSpacing: "-0.005em",
+            letterSpacing: "-0.003em",
           }}
         >
           One shared context layer for Claude, ChatGPT, Cursor, Perplexity, and
@@ -181,53 +181,73 @@ export default async function OpenGraphImage() {
         </div>
       </div>
 
-      {/* Trust line — replaces the noisy install pill. At thumbnail scale
-            (~400px wide) a code snippet is unreadable, but a 4-token trust
-            line still parses. Green dot + plain words + lavender domain. */}
+      {/* ZONE 3 — Trust line + install pill.
+            Two-row composition: trust chips on top (Free · OSS · MIT), the
+            install command in its own bordered pill below. Pill format
+            signals "this is something you can copy" rather than just text. */}
       <div
         style={{
           display: "flex",
-          alignItems: "center",
+          flexDirection: "column",
           gap: "20px",
-          fontSize: "24px",
-          color: "rgba(255,255,255,0.78)",
-          fontWeight: 500,
-          letterSpacing: "-0.005em",
         }}
       >
+        {/* Trust row */}
         <div
           style={{
             display: "flex",
-            width: "12px",
-            height: "12px",
-            borderRadius: "50%",
-            background: "#00c483",
-            boxShadow: "0 0 14px rgba(0,196,131,0.7)",
-          }}
-        />
-        <span style={{ display: "flex" }}>Free</span>
-        <span style={{ display: "flex", color: "rgba(255,255,255,0.32)" }}>
-          ·
-        </span>
-        <span style={{ display: "flex" }}>Open source</span>
-        <span style={{ display: "flex", color: "rgba(255,255,255,0.32)" }}>
-          ·
-        </span>
-        <span style={{ display: "flex" }}>MIT licensed</span>
-        <span style={{ display: "flex", color: "rgba(255,255,255,0.32)" }}>
-          ·
-        </span>
-        <span
-          style={{
-            display: "flex",
-            color: "#9677f8",
-            fontFamily:
-              "ui-monospace, SFMono-Regular, Menlo, Monaco, monospace",
-            fontWeight: 600,
+            alignItems: "center",
+            gap: "18px",
+            fontSize: "22px",
+            color: "rgba(255,255,255,0.78)",
+            fontWeight: 500,
+            letterSpacing: "-0.003em",
           }}
         >
-          npx create-context-hub
-        </span>
+          <div
+            style={{
+              display: "flex",
+              width: "12px",
+              height: "12px",
+              borderRadius: "50%",
+              background: "#00c483",
+              boxShadow: "0 0 14px rgba(0,196,131,0.7)",
+            }}
+          />
+          <span style={{ display: "flex" }}>Free</span>
+          <span style={{ display: "flex", color: "rgba(255,255,255,0.28)" }}>
+            ·
+          </span>
+          <span style={{ display: "flex" }}>Open source</span>
+          <span style={{ display: "flex", color: "rgba(255,255,255,0.28)" }}>
+            ·
+          </span>
+          <span style={{ display: "flex" }}>MIT licensed</span>
+        </div>
+
+        {/* Install pill — faint lavender border, transparent fill,
+              monospace command. Reads as a copyable thing. */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "14px",
+            padding: "14px 22px",
+            borderRadius: "9999px",
+            border: "1.5px solid rgba(150,119,248,0.55)",
+            background: "rgba(150,119,248,0.06)",
+            fontSize: "26px",
+            fontWeight: 600,
+            fontFamily:
+              "ui-monospace, SFMono-Regular, Menlo, Monaco, monospace",
+            alignSelf: "flex-start",
+          }}
+        >
+          <span style={{ display: "flex", color: "#9677f8" }}>$</span>
+          <span style={{ display: "flex", color: "#ffffff" }}>
+            npx create-context-hub
+          </span>
+        </div>
       </div>
     </div>,
     { ...size },
