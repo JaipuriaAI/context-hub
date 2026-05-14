@@ -663,6 +663,51 @@ async function locateProjects(): Promise<void> {
   p.outro(pc.green("Done."));
 }
 
+// Parse the D1 database name from a project's wrangler.json so we can run
+// schema probes / migrations via wrangler CLI without asking the user.
+async function parseDbNameFromWrangler(
+  wranglerPath: string,
+): Promise<string | null> {
+  try {
+    const raw = await readFile(wranglerPath, "utf-8");
+    const json = JSON.parse(raw) as {
+      d1_databases?: Array<{ database_name?: string }>;
+    };
+    return json.d1_databases?.[0]?.database_name ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Probe the remote D1 database to see whether the 0.2 self-evolving schema
+// (confidence column on memories) is already applied. Returns:
+//   "applied"   → schema is on 0.2, no migration needed
+//   "pending"   → 0.1 schema, needs 0002 migration
+//   "unknown"   → probe failed (no auth, DB missing, etc.); caller asks user
+async function probe02Schema(
+  dbName: string,
+  cwd: string,
+): Promise<"applied" | "pending" | "unknown"> {
+  const probe = runCommand(
+    "npx",
+    [
+      "wrangler",
+      "d1",
+      "execute",
+      dbName,
+      "--remote",
+      "--command",
+      "SELECT name FROM pragma_table_info('memories') WHERE name='confidence' LIMIT 1;",
+      "--json",
+    ],
+    cwd,
+  );
+  if (!probe.success) return "unknown";
+  // Wrangler --json output contains the rows; "confidence" presence means applied.
+  if (/"confidence"/.test(probe.output)) return "applied";
+  return "pending";
+}
+
 async function updateProject(): Promise<void> {
   p.intro(pc.bgCyan(pc.black(" create-context-hub update ")));
 
@@ -701,8 +746,18 @@ async function updateProject(): Promise<void> {
   }
 
   p.log.info(
-    `Updating to the ${pc.cyan(`create-context-hub@${cliVersion}`)} template.\n` +
-      `${pc.dim("Your wrangler.json, package.json, and custom files are preserved.")}`,
+    `Updating your Context Hub to ${pc.cyan(`create-context-hub@${cliVersion}`)}.\n\n` +
+      `${pc.bold("What this does, in plain English:")}\n` +
+      `  ${pc.green("✓")} Checks your local files against the new template\n` +
+      `  ${pc.green("✓")} Checks your live Cloudflare database for the latest schema\n` +
+      `  ${pc.green("✓")} Asks you before each step — nothing happens without confirmation\n` +
+      `  ${pc.green("✓")} Backs up files as ${pc.cyan(".bak")} before any change\n` +
+      `  ${pc.green("✓")} Redeploys to Cloudflare so your AI clients see the new tools\n\n` +
+      `${pc.bold("What is preserved:")}\n` +
+      `  ${pc.green("✓")} Every memory you've saved\n` +
+      `  ${pc.green("✓")} Every project, instruction, identity field\n` +
+      `  ${pc.green("✓")} Your wrangler.json, package.json, API keys, custom code\n\n` +
+      `${pc.dim("If something feels off, you can cancel at any prompt by pressing Ctrl+C.")}`,
   );
 
   // Compare template source to user's source to see what's actually changing.
@@ -712,6 +767,13 @@ async function updateProject(): Promise<void> {
     "migrations",
     "0001_init.sql",
   );
+  // 0.2 — self-evolving layer (additive migration). Present in templates ≥ 0.4.
+  const template02MigrationPath = join(
+    TEMPLATES_DIR,
+    "migrations",
+    "0002_self_evolving.sql",
+  );
+  const user02MigrationPath = join(cwd, "migrations", "0002_self_evolving.sql");
 
   const [userIndex, templateIndex, userMigration, templateMigration] =
     await Promise.all([
@@ -721,11 +783,62 @@ async function updateProject(): Promise<void> {
       readFile(templateMigrationPath, "utf-8"),
     ]);
 
+  const template02Exists = existsSync(template02MigrationPath);
+  const user02Exists = existsSync(user02MigrationPath);
+  let template02Migration = "";
+  let user02Migration = "";
+  if (template02Exists) {
+    template02Migration = await readFile(template02MigrationPath, "utf-8");
+  }
+  if (user02Exists) {
+    user02Migration = await readFile(user02MigrationPath, "utf-8");
+  }
+
   const indexChanged = userIndex !== templateIndex;
   const migrationChanged = userMigration !== templateMigration;
+  // 0.2 migration is brand new for upgrading users (file doesn't exist yet).
+  const migration02New = template02Exists && !user02Exists;
+  // Or content drift if both exist.
+  const migration02Changed =
+    template02Exists && user02Exists && template02Migration !== user02Migration;
 
-  if (!indexChanged && !migrationChanged) {
-    p.outro(pc.green("Already up to date — nothing to change."));
+  const filesNeedUpdate =
+    indexChanged || migrationChanged || migration02New || migration02Changed;
+
+  // ── Probe remote D1 BEFORE deciding "already up to date" ─────────────
+  // This is the key fix: even when local files match the template, the user's
+  // live D1 may still be on the 0.1 schema (common when running update from
+  // the source repo, or when a previous update skipped the DB step).
+  const dbName = await parseDbNameFromWrangler(wranglerPath);
+  let dbStatus: "applied" | "pending" | "unknown" = "unknown";
+  if (dbName) {
+    const probeSpinner = p.spinner();
+    probeSpinner.start(`Probing ${dbName} for 0.2 schema...`);
+    dbStatus = await probe02Schema(dbName, cwd);
+    probeSpinner.stop(`Remote schema: ${dbStatus}.`);
+  } else {
+    p.log.warn(
+      "Could not parse database name from wrangler.json — DB probe skipped.",
+    );
+  }
+
+  const dbNeedsMigration = dbStatus === "pending";
+
+  if (!filesNeedUpdate && !dbNeedsMigration) {
+    if (dbStatus === "applied") {
+      p.outro(
+        pc.green(
+          "Already up to date — files match template and remote D1 is on 0.2 schema.",
+        ),
+      );
+    } else {
+      p.outro(
+        pc.green("Files already up to date.") +
+          pc.dim(
+            " (Could not verify remote D1 — run `npm run db:upgrade` manually if needed.)",
+          ),
+      );
+    }
     return;
   }
 
@@ -734,67 +847,178 @@ async function updateProject(): Promise<void> {
   if (indexChanged) {
     const diff = lineDiffSummary(userIndex, templateIndex);
     changes.push(
-      `  ${pc.yellow("~")} src/index.ts              ${pc.dim(`(${diff})`)}`,
+      `  ${pc.yellow("~")} src/index.ts                       ${pc.dim(`(${diff})`)}`,
     );
   }
   if (migrationChanged) {
     const diff = lineDiffSummary(userMigration, templateMigration);
     changes.push(
-      `  ${pc.yellow("~")} migrations/0001_init.sql  ${pc.dim(`(${diff})`)}`,
+      `  ${pc.yellow("~")} migrations/0001_init.sql           ${pc.dim(`(${diff})`)}`,
     );
   }
-  p.log.step(pc.bold("Files that will be updated:"));
+  if (migration02New) {
+    const lines = template02Migration.split("\n").length;
+    changes.push(
+      `  ${pc.green("+")} migrations/0002_self_evolving.sql  ${pc.dim(`(new, ${lines} lines)`)}`,
+    );
+  } else if (migration02Changed) {
+    const diff = lineDiffSummary(user02Migration, template02Migration);
+    changes.push(
+      `  ${pc.yellow("~")} migrations/0002_self_evolving.sql  ${pc.dim(`(${diff})`)}`,
+    );
+  }
+  if (dbNeedsMigration) {
+    changes.push(
+      `  ${pc.green("↑")} remote D1 schema                  ${pc.dim(`(${dbName} — needs 0.2 migration)`)}`,
+    );
+  }
+
+  if (filesNeedUpdate) {
+    p.log.step(pc.bold("Files that will be updated:"));
+  } else {
+    p.log.step(pc.bold("Schema migration needed (files already current):"));
+  }
   p.log.message(changes.join("\n"));
 
+  if (migration02New || migration02Changed || dbNeedsMigration) {
+    p.log.info(
+      `${pc.cyan("0.2 self-evolving layer")} — adds skills, memory_links, reflections, injection_log tables\n` +
+        `${pc.dim("and 6 new columns on `memories` (confidence, verified_at, tier, ...).")}\n` +
+        `${pc.dim("All changes are additive — existing rows keep their data, ALTER TABLE ADD COLUMN")}\n` +
+        `${pc.dim("uses defaults so reads continue working, and new tables use CREATE TABLE IF NOT EXISTS.")}`,
+    );
+  }
   if (migrationChanged) {
     p.log.info(
-      `${pc.dim("Note: the migration file is safe to overwrite — the schema is comment-only compatible across 0.1.x → 0.2.x.")}`,
+      `${pc.dim("0001_init.sql is being refreshed (comment/format changes only — no schema diff against your live DB).")}`,
     );
   }
 
-  const proceed = await p.confirm({
-    message:
-      "Backup (.bak) will be written next to each file. Proceed with update?",
-    initialValue: true,
-  });
-  if (p.isCancel(proceed) || !proceed) {
-    p.outro(pc.yellow("Update cancelled. No changes made."));
+  // Only ask about file-write confirmation if files actually need updating.
+  if (filesNeedUpdate) {
+    const proceed = await p.confirm({
+      message:
+        "Backup (.bak) will be written for each existing file. Proceed with update?",
+      initialValue: true,
+    });
+    if (p.isCancel(proceed) || !proceed) {
+      p.outro(pc.yellow("Update cancelled. No changes made."));
+      return;
+    }
+  }
+
+  // ── File write block (only if files actually differ) ──────────────
+  if (filesNeedUpdate) {
+    const backupSpinner = p.spinner();
+    backupSpinner.start("Backing up existing files...");
+    if (indexChanged) {
+      await copyFile(indexPath, `${indexPath}.bak`);
+    }
+    if (migrationChanged) {
+      await copyFile(migrationPath, `${migrationPath}.bak`);
+    }
+    if (user02Exists && migration02Changed) {
+      await copyFile(user02MigrationPath, `${user02MigrationPath}.bak`);
+    }
+    backupSpinner.stop("Backups written (.bak files).");
+
+    const writeSpinner = p.spinner();
+    writeSpinner.start("Applying template updates...");
+    if (indexChanged) {
+      await writeFile(indexPath, templateIndex, "utf-8");
+    }
+    if (migrationChanged) {
+      await writeFile(migrationPath, templateMigration, "utf-8");
+    }
+    if (template02Exists) {
+      await writeFile(user02MigrationPath, template02Migration, "utf-8");
+    }
+    writeSpinner.stop("Template files updated.");
+  }
+
+  // ── Run remote 0002 migration if D1 schema is on 0.1 ───────────────
+  // We reuse the `dbStatus` probed at the top of the function — runs even
+  // when local files match the template (which is what bit the source-repo case).
+  if (dbNeedsMigration && dbName) {
+    const runMigration = await p.confirm({
+      message:
+        "Apply the 0.2 self-evolving migration to your REMOTE D1 now? (additive only — existing memories preserved)",
+      initialValue: true,
+    });
+    if (p.isCancel(runMigration) || !runMigration) {
+      p.log.info(
+        `${pc.dim("Skipped DB migration. Run later with:")} ${pc.cyan("npm run db:upgrade")}`,
+      );
+    } else {
+      p.log.step("Applying 0002_self_evolving.sql to remote D1...");
+      const migrateResult = runCommandLive(
+        "npx",
+        [
+          "wrangler",
+          "d1",
+          "execute",
+          dbName,
+          "--remote",
+          "--file=./migrations/0002_self_evolving.sql",
+        ],
+        cwd,
+      );
+      if (!migrateResult.success) {
+        p.log.warn(
+          `Migration command exited non-zero. If you see "duplicate column" errors, that's safe — the new columns already exist.\n` +
+            `Re-run later with: ${pc.cyan("npm run db:upgrade")}`,
+        );
+      } else {
+        // Verify by re-probing — gives the user confidence the migration landed.
+        const reProbe = await probe02Schema(dbName, cwd);
+        if (reProbe === "applied") {
+          p.log.success(
+            `${pc.green("0.2 schema applied")} — confirmed via re-probe. Existing memories preserved with defaults (confidence=0.8, tier=warm).`,
+          );
+        } else {
+          p.log.warn(
+            `Migration ran but re-probe still shows '${reProbe}'. Inspect manually: ${pc.cyan(`npx wrangler d1 execute ${dbName} --remote --command "PRAGMA table_info(memories);"`)}`,
+          );
+        }
+      }
+    }
+  } else if (dbStatus === "applied" && filesNeedUpdate) {
+    p.log.info(
+      `${pc.dim("Remote D1 already on 0.2 schema — no DB migration needed.")}`,
+    );
+  } else if (dbStatus === "unknown") {
+    p.log.warn(
+      `Couldn't reach D1 to verify schema (likely not logged in or DB missing).\n` +
+        `If your hub is missing the 0.2 columns, run: ${pc.cyan("npm run db:upgrade")}`,
+    );
+  }
+
+  // Offer to redeploy whenever there was ANY change (files OR DB migration).
+  // A DB-only migration still benefits from a redeploy because the deployed
+  // worker code may be older than the new schema (common when running update
+  // from inside the source repo, or when a prior update skipped deploy).
+  const anythingChanged = filesNeedUpdate || dbNeedsMigration;
+  if (!anythingChanged) {
+    p.outro(
+      pc.green(
+        "Already up to date — files match template and remote D1 is on 0.2 schema.",
+      ),
+    );
     return;
   }
 
-  // Write backups then overwrite.
-  const backupSpinner = p.spinner();
-  backupSpinner.start("Backing up existing files...");
-  if (indexChanged) {
-    await copyFile(indexPath, `${indexPath}.bak`);
-  }
-  if (migrationChanged) {
-    await copyFile(migrationPath, `${migrationPath}.bak`);
-  }
-  backupSpinner.stop("Backups written (.bak files).");
-
-  const writeSpinner = p.spinner();
-  writeSpinner.start("Applying template updates...");
-  if (indexChanged) {
-    await writeFile(indexPath, templateIndex, "utf-8");
-  }
-  if (migrationChanged) {
-    await writeFile(migrationPath, templateMigration, "utf-8");
-  }
-  writeSpinner.stop("Template files updated.");
-
-  // Offer to redeploy.
+  const deployMsg = filesNeedUpdate
+    ? "Redeploy to Cloudflare Workers now?"
+    : "Redeploy worker to Cloudflare now? (Recommended — your live worker code may be older than the new schema.)";
   const deploy = await p.confirm({
-    message: "Redeploy to Cloudflare Workers now?",
+    message: deployMsg,
     initialValue: true,
   });
   if (p.isCancel(deploy) || !deploy) {
     p.log.info(`Deploy when ready: ${pc.cyan("npx wrangler deploy")}`);
     p.outro(
       pc.green("Update applied.") +
-        pc.dim(
-          " Backups saved as src/index.ts.bak and migrations/0001_init.sql.bak.",
-        ),
+        pc.dim(" Backups saved as .bak files next to each updated file."),
     );
     return;
   }
@@ -819,7 +1043,8 @@ async function updateProject(): Promise<void> {
   p.log.success("Redeployed.");
   p.log.info(
     `${pc.dim("Your MCP clients pick up the new tool schemas on their next conversation.")}\n` +
-      `${pc.dim("In Claude Code, run /mcp to refresh immediately.")}`,
+      `${pc.dim("In Claude Code, run /mcp to refresh immediately.")}\n` +
+      `${pc.dim("Try: ")}${pc.cyan('"check hub health"')}${pc.dim(" — your client will call the new get_hub_health tool.")}`,
   );
   p.outro(
     pc.green("Update complete.") +

@@ -1,6 +1,6 @@
 {
   "name": "create-context-hub",
-  "version": "0.3.3",
+  "version": "0.4.2",
   "description": "Create a Context Hub — a personal AI context layer shared across any MCP client (Claude.ai, Claude Code, Claude App, ChatGPT, Perplexity, Cursor, and more). One command to scaffold, deploy, and connect.",
   "type": "module",
   "bin": "./dist/cli.js",
