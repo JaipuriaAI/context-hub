@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { getAuthedHandler } from "./oauth";
+import { WIKI_INSTRUCTIONS, attachMemory, exportMarkdown, ftsAll, registerWikiTools } from "./wiki";
 
 export interface Env {
   DB: D1Database;
@@ -93,10 +94,10 @@ function formatSuggestions(suggestions: Suggestion[]): string {
 }
 
 export class ContextHub extends McpAgent<Env> {
-  server = new McpServer({
-    name: "Context Hub",
-    version: "0.2.0",
-  });
+  server = new McpServer(
+    { name: "Context Hub", version: "0.3.0" },
+    { instructions: WIKI_INSTRUCTIONS },
+  );
 
   // Return the MCP client's self-reported name, slugified for safe DB/URL use.
   // Every MCP client sends clientInfo.name during the initialize handshake
@@ -203,6 +204,14 @@ export class ContextHub extends McpAgent<Env> {
   }
 
   async init() {
+    // ── LLM WIKI (0.3): sources, pages, index, file_answer, lint ──
+    registerWikiTools(this.server, {
+      db: () => this.env.DB,
+      detectSource: () => this.detectSource(),
+      scan: scanForInjection,
+      logInjection: (...args) => this.logInjection(...args),
+    });
+
     // ── MEMORIES ──────────────────────────────────────────────
 
     this.server.tool(
@@ -236,8 +245,17 @@ SMART BEHAVIOR:
           .describe(
             "Where this memory was captured. Auto-detected from the MCP client name if omitted (e.g. claude-code, chatgpt, perplexity, cursor). Only pass explicitly for 'manual' or 'import' seeding.",
           ),
+        source_id: z
+          .number()
+          .int()
+          .optional()
+          .describe("Raw source id (from ingest_source) this fact came from"),
+        page_slug: z
+          .string()
+          .optional()
+          .describe("Wiki page this fact belongs to"),
       },
-      async ({ content, category, tags, source }) => {
+      async ({ content, category, tags, source, source_id, page_slug }) => {
         const db = this.env.DB;
         const resolvedSource = source ?? this.detectSource();
 
@@ -402,6 +420,7 @@ SMART BEHAVIOR:
           .run();
 
         const newId = result.meta.last_row_id as number;
+        const wikiNote = await attachMemory(db, newId, source_id, page_slug);
 
         // 0.2 — Skill-candidate detection. If content describes a procedure
         // (categories: decision/learning; signal words: "first", "then",
@@ -426,7 +445,7 @@ SMART BEHAVIOR:
             {
               type: "text" as const,
               text:
-                `Memory saved (id: ${newId}). Category: ${category}, Source: ${resolvedSource}, Confidence: 0.8` +
+                `Memory saved (id: ${newId}). Category: ${category}, Source: ${resolvedSource}, Confidence: 0.8${wikiNote}` +
                 formatSuggestions(await this.buildSuggestions()),
             },
           ],
@@ -463,7 +482,7 @@ SMART BEHAVIOR: Use natural keywords from the user's question as the query. If n
                  WHERE fts.content MATCH ? AND m.category = ?
                  ORDER BY rank
                  LIMIT ?`;
-          params.push(query, category, limit);
+          params.push(category, limit);
         } else {
           sql = `SELECT m.id, m.content, m.category, m.tags, m.source, m.created_at
                  FROM memories_fts fts
@@ -471,13 +490,11 @@ SMART BEHAVIOR: Use natural keywords from the user's question as the query. If n
                  WHERE fts.content MATCH ?
                  ORDER BY rank
                  LIMIT ?`;
-          params.push(query, limit);
+          params.push(limit);
         }
 
-        const results = await db
-          .prepare(sql)
-          .bind(...params)
-          .all();
+        // Quoted tokens: raw text such as "context-hub" is FTS5 syntax otherwise.
+        const results = { results: await ftsAll(db, sql, query, params) };
 
         if (!results.results || results.results.length === 0) {
           return {
@@ -1185,17 +1202,19 @@ SMART BEHAVIOR:
       async ({ query, project_name, limit }) => {
         const db = this.env.DB;
 
-        const ftsResults = await db
-          .prepare(
+        const ftsResults = {
+          results: await ftsAll(
+            db,
             `SELECT m.id, m.content, m.tags, m.source, m.created_at
              FROM memories_fts fts
              JOIN memories m ON fts.rowid = m.id
              WHERE fts.content MATCH ? AND m.category = 'decision'
              ORDER BY rank
              LIMIT ?`,
-          )
-          .bind(query, limit)
-          .all();
+            query,
+            [limit],
+          ),
+        };
 
         let decisions = ftsResults.results || [];
 
@@ -2833,6 +2852,25 @@ const mcpHandler = ContextHub.serve("/mcp", {
   },
 });
 
+// Everything under /mcp sits behind the OAuth front door. The markdown export
+// (Obsidian mirror) shares that protection; all other /mcp traffic is MCP.
+const apiHandler = {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === "/mcp/export/markdown") {
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", { status: 405, headers: { Allow: "GET" } });
+      }
+      const files = await exportMarkdown(env.DB);
+      return new Response(
+        JSON.stringify({ generated_at: new Date().toISOString(), files }),
+        { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } },
+      );
+    }
+    return mcpHandler.fetch(request, env, ctx);
+  },
+};
+
 export default {
   async fetch(
     request: Request,
@@ -2846,19 +2884,19 @@ export default {
       return new Response(
         JSON.stringify({
           name: "Context Hub",
-          version: "0.2.0",
+          version: "0.3.0",
           status: "ok",
-          endpoints: ["/mcp"],
+          endpoints: ["/mcp", "/mcp/export/markdown"],
+          auth: env.API_KEY ? "oauth2.1+bearer" : "locked (set API_KEY)",
         }),
         {
           headers: { "Content-Type": "application/json" },
         },
       );
     }
-          auth: env.API_KEY ? "oauth2.1+bearer" : "locked (set API_KEY)",
 
     // OAuth 2.1 front door: serves discovery, /register, /token, /authorize and
     // only lets requests with a valid token reach McpAgent's /mcp handler.
-    return getAuthedHandler(request, env, mcpHandler).fetch(request, env, ctx);
+    return getAuthedHandler(request, env, apiHandler).fetch(request, env, ctx);
   },
 } satisfies ExportedHandler<Env>;

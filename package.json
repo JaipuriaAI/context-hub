@@ -6,10 +6,13 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "db:migrate": "wrangler d1 execute context-hub-db --local --file=./migrations/0001_init.sql && wrangler d1 execute context-hub-db --local --file=./migrations/0002_self_evolving.sql",
-    "db:migrate:remote": "wrangler d1 execute context-hub-db --remote --file=./migrations/0001_init.sql && wrangler d1 execute context-hub-db --remote --file=./migrations/0002_self_evolving.sql",
+    "db:migrate": "wrangler d1 execute context-hub-db --local --file=./migrations/0001_init.sql && wrangler d1 execute context-hub-db --local --file=./migrations/0002_self_evolving.sql && wrangler d1 execute context-hub-db --local --file=./migrations/0003_llm_wiki.sql",
+    "db:migrate:remote": "wrangler d1 execute context-hub-db --remote --file=./migrations/0001_init.sql && wrangler d1 execute context-hub-db --remote --file=./migrations/0002_self_evolving.sql && wrangler d1 execute context-hub-db --remote --file=./migrations/0003_llm_wiki.sql",
     "db:migrate:0002": "wrangler d1 execute context-hub-db --local --file=./migrations/0002_self_evolving.sql",
     "db:migrate:0002:remote": "wrangler d1 execute context-hub-db --remote --file=./migrations/0002_self_evolving.sql",
+    "db:migrate:0003": "wrangler d1 execute context-hub-db --local --file=./migrations/0003_llm_wiki.sql",
+    "db:migrate:0003:remote": "wrangler d1 execute context-hub-db --remote --file=./migrations/0003_llm_wiki.sql",
+    "wiki:sync": "node scripts/sync-obsidian.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/"
   },
