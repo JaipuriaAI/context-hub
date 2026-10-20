@@ -25,6 +25,7 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.25.2",
+    "@cloudflare/workers-oauth-provider": "^1.2.3",
     "agents": "^0.3.6"
   },
   "devDependencies": {

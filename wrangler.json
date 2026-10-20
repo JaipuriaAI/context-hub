@@ -13,6 +13,11 @@
 			"database_id": "YOUR_D1_DATABASE_ID"
 		}
 	],
+	"kv_namespaces": [
+		{
+			"binding": "OAUTH_KV"
+		}
+	],
 	"durable_objects": {
 		"bindings": [
 			{

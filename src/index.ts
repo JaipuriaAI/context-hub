@@ -1,11 +1,16 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
+import { getAuthedHandler } from "./oauth";
 
 export interface Env {
   DB: D1Database;
   CONTEXT_HUB: DurableObjectNamespace;
-  API_KEY?: string; // Optional: protect your hub with a shared secret
+  API_KEY?: string; // Owner secret: the /authorize passphrase AND an accepted static bearer token
+  OAUTH_KV: KVNamespace; // OAuth clients, grants and tokens (hashed) + login rate-limit counters
+  OAUTH_PROVIDER: OAuthHelpers; // injected by OAuthProvider for the /authorize handler
+  PUBLIC_URL?: string; // Optional: pin the public origin (custom domain); default = request origin
 }
 
 // ── INJECTION SCANNER ──────────────────────────────────────────
@@ -2850,8 +2855,10 @@ export default {
         },
       );
     }
+          auth: env.API_KEY ? "oauth2.1+bearer" : "locked (set API_KEY)",
 
-    // Delegate all /mcp traffic to McpAgent's handler
-    return mcpHandler.fetch(request, env, ctx);
+    // OAuth 2.1 front door: serves discovery, /register, /token, /authorize and
+    // only lets requests with a valid token reach McpAgent's /mcp handler.
+    return getAuthedHandler(request, env, mcpHandler).fetch(request, env, ctx);
   },
 } satisfies ExportedHandler<Env>;
