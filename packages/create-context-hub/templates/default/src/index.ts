@@ -8,10 +8,89 @@ export interface Env {
   API_KEY?: string; // Optional: protect your hub with a shared secret
 }
 
+// ── INJECTION SCANNER ──────────────────────────────────────────
+// Hermes-style prompt-injection detection on every write surface.
+// Returns matched rule IDs + severity. Tool decides whether to block or flag.
+const INJECTION_PATTERNS: Array<{
+  id: string;
+  pattern: RegExp;
+  severity: "low" | "medium" | "high";
+}> = [
+  {
+    id: "ignore_previous",
+    pattern: /ignore (all|any|previous|prior)\s+(instructions|rules|prompts)/i,
+    severity: "high",
+  },
+  {
+    id: "system_override",
+    pattern: /you are (now|actually|really)\s+(a|an)\s+/i,
+    severity: "medium",
+  },
+  {
+    id: "exfil_curl",
+    pattern: /\b(curl|wget|fetch)\s+(https?:\/\/|-X\s+POST)/i,
+    severity: "high",
+  },
+  {
+    id: "ssh_backdoor",
+    pattern: /ssh-(rsa|ed25519|dss)\s+[A-Za-z0-9+/=]{50,}/i,
+    severity: "high",
+  },
+  {
+    id: "shell_pipe",
+    pattern: /\$\(.*\)|`[^`]{20,}`|;\s*(rm|curl|wget|nc)\s+/i,
+    severity: "medium",
+  },
+  {
+    id: "tool_jailbreak",
+    pattern: /\b(developer mode|dan mode|jailbreak|sudo override)\b/i,
+    severity: "medium",
+  },
+  {
+    id: "memory_overwrite",
+    pattern: /delete (all|every) (memory|memories|instruction)/i,
+    severity: "high",
+  },
+  {
+    id: "system_prompt_leak",
+    pattern:
+      /(print|show|reveal|repeat)\s+(your|the)\s+(system|initial)\s+(prompt|instructions)/i,
+    severity: "medium",
+  },
+];
+
+function scanForInjection(content: string): {
+  matched: string[];
+  severity: "low" | "medium" | "high" | null;
+} {
+  const matched: string[] = [];
+  let maxSev: "low" | "medium" | "high" | null = null;
+  const rank = { low: 1, medium: 2, high: 3 };
+  for (const rule of INJECTION_PATTERNS) {
+    if (rule.pattern.test(content)) {
+      matched.push(rule.id);
+      if (!maxSev || rank[rule.severity] > rank[maxSev]) maxSev = rule.severity;
+    }
+  }
+  return { matched, severity: maxSev };
+}
+
+// Append-only suggestion appended to tool responses to nudge users toward
+// better hygiene without breaking existing tool contracts. Format is intentionally
+// human + LLM readable so any client surfaces it naturally.
+type Suggestion = { kind: string; message: string; action?: string };
+function formatSuggestions(suggestions: Suggestion[]): string {
+  if (!suggestions.length) return "";
+  const lines = suggestions.map(
+    (s) => `• [${s.kind}] ${s.message}${s.action ? `\n  → ${s.action}` : ""}`,
+  );
+  return `\n\n💡 hub_suggestion:\n${lines.join("\n")}`;
+}
+
 export class ContextHub extends McpAgent<Env> {
   server = new McpServer({
     name: "Context Hub",
-    version: "0.1.0",
+    version: "0.2.0",
   });
 
   // Return the MCP client's self-reported name, slugified for safe DB/URL use.
@@ -29,6 +108,93 @@ export class ContextHub extends McpAgent<Env> {
       .replace(/^-+|-+$/g, "")
       .slice(0, 64);
     return slug || "unknown";
+  }
+
+  // Log an injection scan hit. Doesn't block — surfaces in the response.
+  private async logInjection(
+    surface: string,
+    content: string,
+    matched: string[],
+    severity: "low" | "medium" | "high",
+    action: "blocked" | "flagged" | "sanitized",
+  ): Promise<void> {
+    try {
+      await this.env.DB.prepare(
+        "INSERT INTO injection_log (source, surface, content_preview, patterns_matched, severity, action_taken) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+        .bind(
+          this.detectSource(),
+          surface,
+          content.slice(0, 200),
+          matched.join(","),
+          severity,
+          action,
+        )
+        .run();
+    } catch {
+      // injection_log table may not exist on older deploys — fail silent
+    }
+  }
+
+  // Record a reflection (contradiction, skill candidate, etc.). Pending until acted on.
+  private async recordReflection(
+    trigger: string,
+    observation: string,
+    proposedChange: string = "",
+    relatedIds: string = "",
+  ): Promise<number | null> {
+    try {
+      const r = await this.env.DB.prepare(
+        "INSERT INTO reflections (trigger, observation, proposed_change, related_ids) VALUES (?, ?, ?, ?)",
+      )
+        .bind(trigger, observation, proposedChange, relatedIds)
+        .run();
+      return (r.meta?.last_row_id as number) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Bump access_count + last_accessed_at and auto-promote to hot tier if
+  // a memory is hit often. Cheap fire-and-forget — failures don't break reads.
+  private async bumpAccess(ids: number[]): Promise<void> {
+    if (!ids.length) return;
+    try {
+      const placeholders = ids.map(() => "?").join(",");
+      await this.env.DB.prepare(
+        `UPDATE memories
+         SET access_count = access_count + 1,
+             last_accessed_at = datetime('now'),
+             tier = CASE WHEN access_count + 1 >= 5 AND tier = 'warm' THEN 'hot' ELSE tier END
+         WHERE id IN (${placeholders})`,
+      )
+        .bind(...ids)
+        .run();
+    } catch {
+      // Tier columns may not exist on older deploys
+    }
+  }
+
+  // Build the suggestion block for a save-style response. Looks at recent
+  // pending reflections + global hub state and surfaces what the user should do.
+  private async buildSuggestions(): Promise<Suggestion[]> {
+    const out: Suggestion[] = [];
+    try {
+      const pending = await this.env.DB.prepare(
+        "SELECT id, trigger, observation FROM reflections WHERE status = 'pending' ORDER BY created_at DESC LIMIT 3",
+      ).all();
+      for (const r of pending.results || []) {
+        const row = r as Record<string, unknown>;
+        out.push({
+          kind: row.trigger as string,
+          message: row.observation as string,
+          action: `Call resolve_reflection with id=${row.id} after acting.`,
+        });
+      }
+    } catch {
+      // reflections table may not exist
+    }
+    return out;
   }
 
   async init() {
@@ -69,6 +235,35 @@ SMART BEHAVIOR:
       async ({ content, category, tags, source }) => {
         const db = this.env.DB;
         const resolvedSource = source ?? this.detectSource();
+
+        // 0.2 — Injection scan. We flag (not block) so the user can review.
+        const scan = scanForInjection(content);
+        if (scan.severity === "high") {
+          await this.logInjection(
+            "save_memory",
+            content,
+            scan.matched,
+            scan.severity,
+            "blocked",
+          );
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `⛔ Memory blocked. Content matched high-severity injection patterns: ${scan.matched.join(", ")}.\n\nIf this is legitimate, rephrase or use save_memory with a safer wording. Logged to injection_log for audit.`,
+              },
+            ],
+          };
+        }
+        if (scan.severity) {
+          await this.logInjection(
+            "save_memory",
+            content,
+            scan.matched,
+            scan.severity,
+            "flagged",
+          );
+        }
 
         // Dedup check: look for existing memories with similar content
         // First try exact match
@@ -143,7 +338,7 @@ SMART BEHAVIOR:
                 // Very similar — update existing instead of creating duplicate
                 await db
                   .prepare(
-                    "UPDATE memories SET content = ?, tags = ?, source = ?, updated_at = datetime('now') WHERE id = ?",
+                    "UPDATE memories SET content = ?, tags = ?, source = ?, updated_at = datetime('now'), verified_at = datetime('now'), confidence = MIN(1.0, confidence + 0.1) WHERE id = ?",
                   )
                   .bind(content, tags, resolvedSource, row.id)
                   .run();
@@ -151,28 +346,83 @@ SMART BEHAVIOR:
                   content: [
                     {
                       type: "text" as const,
-                      text: `Similar memory found (id: ${row.id}), updated with new content instead of creating duplicate.`,
+                      text:
+                        `Similar memory found (id: ${row.id}), updated with new content. confidence bumped, verified_at refreshed.` +
+                        formatSuggestions(await this.buildSuggestions()),
                     },
                   ],
                 };
+              }
+              // 0.2 — Contradiction detection: similarity 0.3-0.6 with opposing
+              // signal words ("prefer/hate", "use/avoid", "always/never") suggests
+              // the new memory may contradict the old. Record a reflection.
+              if (similarity >= 0.3 && similarity <= 0.6) {
+                const oppositePairs = [
+                  ["prefer", "hate"],
+                  ["love", "hate"],
+                  ["use", "avoid"],
+                  ["always", "never"],
+                  ["enable", "disable"],
+                  ["like", "dislike"],
+                ];
+                const newC = content.toLowerCase();
+                const oldC = (row.content as string).toLowerCase();
+                const contradicts = oppositePairs.some(
+                  ([a, b]) =>
+                    (newC.includes(a) && oldC.includes(b)) ||
+                    (newC.includes(b) && oldC.includes(a)),
+                );
+                if (contradicts) {
+                  await this.recordReflection(
+                    "contradiction",
+                    `New memory may contradict memory #${row.id}. Old: "${(row.content as string).slice(0, 120)}" — New: "${content.slice(0, 120)}"`,
+                    JSON.stringify({
+                      action: "review_contradiction",
+                      target_id: row.id,
+                    }),
+                    String(row.id),
+                  );
+                }
               }
             }
           }
         }
 
-        // No duplicate found — insert new
+        // No duplicate found — insert new (with 0.2 provenance fields)
         const result = await db
           .prepare(
-            "INSERT INTO memories (content, category, tags, source) VALUES (?, ?, ?, ?)",
+            "INSERT INTO memories (content, category, tags, source, verified_at, confidence) VALUES (?, ?, ?, ?, datetime('now'), 0.8)",
           )
           .bind(content, category, tags, resolvedSource)
           .run();
+
+        const newId = result.meta.last_row_id as number;
+
+        // 0.2 — Skill-candidate detection. If content describes a procedure
+        // (categories: decision/learning; signal words: "first", "then",
+        // "step", "always when"), record a skill candidate for the user to promote.
+        const procedural =
+          /\b(first|then|next|step\s*\d|finally|always when|whenever|process is)\b/i;
+        if (
+          (category === "learning" || category === "decision") &&
+          procedural.test(content) &&
+          content.length >= 80
+        ) {
+          await this.recordReflection(
+            "skill_candidate",
+            `Memory #${newId} reads like a procedure. Promote it to a reusable skill so the next similar task auto-loads it.`,
+            JSON.stringify({ action: "promote_to_skill", target_id: newId }),
+            String(newId),
+          );
+        }
 
         return {
           content: [
             {
               type: "text" as const,
-              text: `Memory saved (id: ${result.meta.last_row_id}). Category: ${category}, Source: ${resolvedSource}`,
+              text:
+                `Memory saved (id: ${newId}). Category: ${category}, Source: ${resolvedSource}, Confidence: 0.8` +
+                formatSuggestions(await this.buildSuggestions()),
             },
           ],
         };
@@ -235,6 +485,12 @@ SMART BEHAVIOR: Use natural keywords from the user's question as the query. If n
           };
         }
 
+        // 0.2 — bump access_count + last_accessed_at for tier promotion
+        const hitIds = results.results
+          .map((r: Record<string, unknown>) => r.id as number)
+          .filter((id) => typeof id === "number");
+        await this.bumpAccess(hitIds);
+
         const formatted = results.results
           .map(
             (r: Record<string, unknown>) =>
@@ -246,7 +502,9 @@ SMART BEHAVIOR: Use natural keywords from the user's question as the query. If n
           content: [
             {
               type: "text" as const,
-              text: `Found ${results.results.length} memories:\n\n${formatted}`,
+              text:
+                `Found ${results.results.length} memories:\n\n${formatted}` +
+                formatSuggestions(await this.buildSuggestions()),
             },
           ],
         };
@@ -1963,6 +2221,597 @@ Use plenty of color, whitespace, and visual hierarchy. Think of it as a clean, m
         };
       },
     );
+
+    // ══════════════════════════════════════════════════════════════
+    // 0.2 — SELF-EVOLVING LAYER (Hermes + LLM Wiki)
+    // ══════════════════════════════════════════════════════════════
+
+    // ── SKILLS (procedural memory) ──────────────────────────────
+
+    this.server.tool(
+      "save_skill",
+      `Save a reusable skill — a markdown procedure the agent can auto-load next time a similar task appears. Skills are the "self-improving" layer: facts go in memories, methods go in skills.
+
+WHEN TO USE: When a complex task succeeds and the procedure is worth re-running. Promote a memory to a skill when a reflection of kind "skill_candidate" is pending. Also use when the user says "remember how to do X", "save this workflow", "add this as a skill".
+
+SMART BEHAVIOR:
+- trigger_pattern: keywords the agent should look for when deciding to load this skill (e.g. "deploy frontend", "publish npm")
+- procedure: markdown describing the steps — what to do, in what order, with gotchas
+- Upserts by name. Bumps version + sets parent_skill_id when an existing skill is rewritten.`,
+      {
+        name: z
+          .string()
+          .describe("Skill name (unique slug, e.g. 'deploy-cf-worker')"),
+        trigger_pattern: z
+          .string()
+          .describe(
+            "Keywords/description for when this skill should auto-load",
+          ),
+        procedure: z.string().describe("The markdown how-to"),
+        tags: z.string().default("").describe("Comma-separated tags"),
+        parent_memory_id: z
+          .number()
+          .optional()
+          .describe("If promoting a memory, its id (links lineage)"),
+      },
+      async ({ name, trigger_pattern, procedure, tags, parent_memory_id }) => {
+        const db = this.env.DB;
+        const scan = scanForInjection(procedure);
+        if (scan.severity === "high") {
+          await this.logInjection(
+            "save_skill",
+            procedure,
+            scan.matched,
+            scan.severity,
+            "blocked",
+          );
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `⛔ Skill blocked. Procedure matched high-severity injection patterns: ${scan.matched.join(", ")}.`,
+              },
+            ],
+          };
+        }
+        const source = this.detectSource();
+        const existing = await db
+          .prepare("SELECT id, version FROM skills WHERE name = ?")
+          .bind(name)
+          .first();
+
+        let skillId: number;
+        if (existing) {
+          const ex = existing as Record<string, unknown>;
+          const newVersion = ((ex.version as number) ?? 1) + 1;
+          await db
+            .prepare(
+              `UPDATE skills SET trigger_pattern = ?, procedure = ?, tags = ?, version = ?, parent_skill_id = ?, source = ?, updated_at = datetime('now') WHERE id = ?`,
+            )
+            .bind(
+              trigger_pattern,
+              procedure,
+              tags,
+              newVersion,
+              ex.id,
+              source,
+              ex.id,
+            )
+            .run();
+          skillId = ex.id as number;
+        } else {
+          const r = await db
+            .prepare(
+              `INSERT INTO skills (name, trigger_pattern, procedure, tags, source) VALUES (?, ?, ?, ?, ?)`,
+            )
+            .bind(name, trigger_pattern, procedure, tags, source)
+            .run();
+          skillId = r.meta.last_row_id as number;
+        }
+
+        // If promoted from a memory, link the lineage
+        if (parent_memory_id) {
+          await this.recordReflection(
+            "skill_candidate",
+            `Memory #${parent_memory_id} promoted to skill "${name}" (#${skillId}).`,
+            JSON.stringify({ action: "applied", target_id: skillId }),
+            `${parent_memory_id},${skillId}`,
+          );
+        }
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Skill "${name}" saved (id: ${skillId}). Will auto-load when triggers match.`,
+            },
+          ],
+        };
+      },
+    );
+
+    this.server.tool(
+      "get_skill",
+      `Load a skill's procedure by name or by matching the current task to a trigger pattern.
+
+WHEN TO USE: Before starting a complex recurring task — search skills first, follow the saved procedure if one matches. After the task finishes, call record_skill_outcome to track success/failure.
+
+SMART BEHAVIOR: If 'query' is provided, runs FTS over name/trigger/procedure. If 'name' is provided, exact lookup.`,
+      {
+        name: z.string().optional().describe("Exact skill name"),
+        query: z
+          .string()
+          .optional()
+          .describe("Free-text query to match trigger patterns"),
+      },
+      async ({ name, query }) => {
+        const db = this.env.DB;
+        let rows: Record<string, unknown>[] = [];
+        if (name) {
+          const row = await db
+            .prepare("SELECT * FROM skills WHERE name = ? AND active = 1")
+            .bind(name)
+            .first();
+          if (row) rows = [row as Record<string, unknown>];
+        } else if (query) {
+          const keywords = query
+            .toLowerCase()
+            .replace(/[^\w\s]/g, "")
+            .split(/\s+/)
+            .filter((w) => w.length >= 3)
+            .slice(0, 8)
+            .join(" OR ");
+          if (keywords) {
+            const r = await db
+              .prepare(
+                `SELECT s.* FROM skills_fts fts JOIN skills s ON fts.rowid = s.id WHERE fts.skills_fts MATCH ? AND s.active = 1 ORDER BY rank LIMIT 5`,
+              )
+              .bind(keywords)
+              .all();
+            rows = (r.results || []) as Record<string, unknown>[];
+          }
+        }
+        if (!rows.length) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "No matching skill found. Use save_skill to create one.",
+              },
+            ],
+          };
+        }
+        // Bump last_used_at on retrieved skills
+        const ids = rows.map((r) => r.id as number);
+        const placeholders = ids.map(() => "?").join(",");
+        await db
+          .prepare(
+            `UPDATE skills SET last_used_at = datetime('now') WHERE id IN (${placeholders})`,
+          )
+          .bind(...ids)
+          .run();
+        const out = rows
+          .map(
+            (r) =>
+              `## ${r.name} (v${r.version}, id ${r.id})\nTrigger: ${r.trigger_pattern}\nSuccess: ${r.success_count} | Failures: ${r.failure_count}\n\n${r.procedure}`,
+          )
+          .join("\n\n---\n\n");
+        return { content: [{ type: "text" as const, text: out }] };
+      },
+    );
+
+    this.server.tool(
+      "list_skills",
+      `List all active skills with their success/failure counts. Use to audit procedural memory.`,
+      {
+        limit: z.number().default(50),
+      },
+      async ({ limit }) => {
+        const db = this.env.DB;
+        const r = await db
+          .prepare(
+            `SELECT id, name, trigger_pattern, version, success_count, failure_count, last_used_at FROM skills WHERE active = 1 ORDER BY (success_count - failure_count) DESC, last_used_at DESC LIMIT ?`,
+          )
+          .bind(limit)
+          .all();
+        if (!r.results?.length) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "No skills saved yet. Promote a memory with save_skill.",
+              },
+            ],
+          };
+        }
+        const out = r.results
+          .map((s) => {
+            const row = s as Record<string, unknown>;
+            return `[${row.id}] ${row.name} v${row.version} — ${row.trigger_pattern}\n    ✓ ${row.success_count}  ✗ ${row.failure_count}  last: ${row.last_used_at || "never"}`;
+          })
+          .join("\n\n");
+        return { content: [{ type: "text" as const, text: out }] };
+      },
+    );
+
+    this.server.tool(
+      "record_skill_outcome",
+      `Record whether a skill worked. Skills with high failure rates surface as reflections so the user can refine them.`,
+      {
+        skill_id: z.number(),
+        success: z.boolean(),
+        note: z.string().default(""),
+      },
+      async ({ skill_id, success, note }) => {
+        const db = this.env.DB;
+        const col = success ? "success_count" : "failure_count";
+        await db
+          .prepare(
+            `UPDATE skills SET ${col} = ${col} + 1, last_used_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`,
+          )
+          .bind(skill_id)
+          .run();
+        // If failure rate > 50% and >= 3 total runs, flag a reflection
+        const row = (await db
+          .prepare(
+            "SELECT name, success_count, failure_count FROM skills WHERE id = ?",
+          )
+          .bind(skill_id)
+          .first()) as Record<string, unknown> | null;
+        if (row) {
+          const s = row.success_count as number;
+          const f = row.failure_count as number;
+          if (f + s >= 3 && f / (f + s) > 0.5) {
+            await this.recordReflection(
+              "skill_failed",
+              `Skill "${row.name}" (#${skill_id}) is failing more than succeeding (${f}/${f + s}). Refine the procedure or retire it.`,
+              JSON.stringify({ action: "refine_skill", target_id: skill_id }),
+              String(skill_id),
+            );
+          }
+        }
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Outcome recorded for skill ${skill_id}: ${success ? "success" : "failure"}.${note ? ` Note: ${note}` : ""}`,
+            },
+          ],
+        };
+      },
+    );
+
+    // ── MEMORY LINKS (wiki graph) ────────────────────────────────
+
+    this.server.tool(
+      "link_memories",
+      `Create a typed link between two memories. Builds the wiki-style graph that lets the hub flag contradictions, supersession, and clusters.
+
+WHEN TO USE: When you spot a relationship between two memories — one supersedes another, two memories contradict, one supports another, or they're examples of a shared idea.
+
+RELATIONS:
+- supersedes: from_id replaces to_id (also sets to_id.superseded_by)
+- contradicts: from_id contradicts to_id (both kept, flagged)
+- supports: from_id reinforces to_id
+- related: loose association
+- example_of: from_id is an instance of to_id
+- refines: from_id is a more precise version of to_id`,
+      {
+        from_id: z.number(),
+        to_id: z.number(),
+        relation: z.enum([
+          "supersedes",
+          "contradicts",
+          "supports",
+          "related",
+          "example_of",
+          "refines",
+        ]),
+        note: z.string().default(""),
+      },
+      async ({ from_id, to_id, relation, note }) => {
+        const db = this.env.DB;
+        if (from_id === to_id) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "Cannot link a memory to itself.",
+              },
+            ],
+          };
+        }
+        await db
+          .prepare(
+            `INSERT INTO memory_links (from_id, to_id, relation, note) VALUES (?, ?, ?, ?)
+             ON CONFLICT(from_id, to_id, relation) DO UPDATE SET note = excluded.note`,
+          )
+          .bind(from_id, to_id, relation, note)
+          .run();
+        if (relation === "supersedes") {
+          await db
+            .prepare(
+              "UPDATE memories SET superseded_by = ?, tier = 'cold' WHERE id = ?",
+            )
+            .bind(from_id, to_id)
+            .run();
+        }
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Linked #${from_id} —[${relation}]→ #${to_id}.${relation === "supersedes" ? ` Memory #${to_id} marked cold (superseded).` : ""}`,
+            },
+          ],
+        };
+      },
+    );
+
+    this.server.tool(
+      "get_memory_graph",
+      `Get a memory's neighborhood — all incoming + outgoing links + the actual linked memories. Use to understand what surrounds a fact.`,
+      {
+        memory_id: z.number(),
+        depth: z
+          .number()
+          .default(1)
+          .describe("Currently only depth=1 supported"),
+      },
+      async ({ memory_id }) => {
+        const db = this.env.DB;
+        const center = (await db
+          .prepare("SELECT * FROM memories WHERE id = ?")
+          .bind(memory_id)
+          .first()) as Record<string, unknown> | null;
+        if (!center) {
+          return {
+            content: [
+              { type: "text" as const, text: `Memory ${memory_id} not found.` },
+            ],
+          };
+        }
+        const outgoing = await db
+          .prepare(
+            `SELECT l.relation, l.note, m.id, m.content, m.category FROM memory_links l JOIN memories m ON m.id = l.to_id WHERE l.from_id = ?`,
+          )
+          .bind(memory_id)
+          .all();
+        const incoming = await db
+          .prepare(
+            `SELECT l.relation, l.note, m.id, m.content, m.category FROM memory_links l JOIN memories m ON m.id = l.from_id WHERE l.to_id = ?`,
+          )
+          .bind(memory_id)
+          .all();
+        const sections = [
+          `## Memory #${memory_id} (${center.category}, confidence ${center.confidence})\n${center.content}`,
+        ];
+        if (outgoing.results?.length) {
+          sections.push(
+            "## Outgoing\n" +
+              outgoing.results
+                .map((r) => {
+                  const row = r as Record<string, unknown>;
+                  return `→ [${row.relation}] #${row.id} (${row.category}): ${(row.content as string).slice(0, 100)}`;
+                })
+                .join("\n"),
+          );
+        }
+        if (incoming.results?.length) {
+          sections.push(
+            "## Incoming\n" +
+              incoming.results
+                .map((r) => {
+                  const row = r as Record<string, unknown>;
+                  return `← [${row.relation}] #${row.id} (${row.category}): ${(row.content as string).slice(0, 100)}`;
+                })
+                .join("\n"),
+          );
+        }
+        return {
+          content: [{ type: "text" as const, text: sections.join("\n\n") }],
+        };
+      },
+    );
+
+    // ── REFLECTIONS (self-improvement queue) ─────────────────────
+
+    this.server.tool(
+      "list_reflections",
+      `List pending reflections — things the hub noticed and wants the user to resolve. Contradictions, stale facts, skill candidates, failing skills.
+
+WHEN TO USE: Periodically (start of session, after a batch of saves) to catch up on hub housekeeping. The hub appends a hint to write responses already, but call this to see the full queue.`,
+      {
+        status: z
+          .enum(["pending", "applied", "dismissed", "all"])
+          .default("pending"),
+        limit: z.number().default(20),
+      },
+      async ({ status, limit }) => {
+        const db = this.env.DB;
+        const sql =
+          status === "all"
+            ? "SELECT * FROM reflections ORDER BY created_at DESC LIMIT ?"
+            : "SELECT * FROM reflections WHERE status = ? ORDER BY created_at DESC LIMIT ?";
+        const r =
+          status === "all"
+            ? await db.prepare(sql).bind(limit).all()
+            : await db.prepare(sql).bind(status, limit).all();
+        if (!r.results?.length) {
+          return {
+            content: [
+              { type: "text" as const, text: "No reflections. Hub is clean." },
+            ],
+          };
+        }
+        const out = r.results
+          .map((row) => {
+            const x = row as Record<string, unknown>;
+            return `[${x.id}] (${x.status} / ${x.trigger}) ${x.observation}${x.related_ids ? `\n    related: ${x.related_ids}` : ""}`;
+          })
+          .join("\n\n");
+        return { content: [{ type: "text" as const, text: out }] };
+      },
+    );
+
+    this.server.tool(
+      "resolve_reflection",
+      `Mark a reflection as applied or dismissed. Call after you (or the user) acted on it.`,
+      {
+        id: z.number(),
+        resolution: z.enum(["applied", "dismissed"]),
+      },
+      async ({ id, resolution }) => {
+        const db = this.env.DB;
+        await db
+          .prepare(
+            "UPDATE reflections SET status = ?, resolved_at = datetime('now') WHERE id = ?",
+          )
+          .bind(resolution, id)
+          .run();
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Reflection ${id} marked ${resolution}.`,
+            },
+          ],
+        };
+      },
+    );
+
+    // ── HUB HEALTH (the nudge surface) ───────────────────────────
+
+    this.server.tool(
+      "get_hub_health",
+      `Inspect the hub's hygiene: stale memories, contradictions, low-confidence facts, skill candidates, injection log. Returns a prioritized action list.
+
+WHEN TO USE: At session start (alongside get_full_context) or whenever the user asks "what's the state of my hub?" / "is my memory healthy?". Use the action list to nudge the user toward fixing the worst issues first.`,
+      {},
+      async () => {
+        const db = this.env.DB;
+        const [
+          stale,
+          lowConf,
+          pending,
+          contradictions,
+          failingSkills,
+          recentInjections,
+        ] = await Promise.all([
+          db
+            .prepare(
+              `SELECT COUNT(*) as c FROM memories WHERE verified_at IS NULL OR verified_at < datetime('now', '-180 days')`,
+            )
+            .first(),
+          db
+            .prepare(
+              `SELECT COUNT(*) as c FROM memories WHERE confidence < 0.5`,
+            )
+            .first(),
+          db
+            .prepare(
+              `SELECT trigger, COUNT(*) as c FROM reflections WHERE status = 'pending' GROUP BY trigger`,
+            )
+            .all(),
+          db
+            .prepare(
+              `SELECT COUNT(*) as c FROM memory_links WHERE relation = 'contradicts'`,
+            )
+            .first(),
+          db
+            .prepare(
+              `SELECT name, success_count, failure_count FROM skills WHERE active = 1 AND failure_count > success_count AND (failure_count + success_count) >= 3`,
+            )
+            .all(),
+          db
+            .prepare(
+              `SELECT COUNT(*) as c FROM injection_log WHERE created_at > datetime('now', '-7 days')`,
+            )
+            .first(),
+        ]);
+
+        const staleC = ((stale as Record<string, unknown>)?.c as number) || 0;
+        const lowC = ((lowConf as Record<string, unknown>)?.c as number) || 0;
+        const contraC =
+          ((contradictions as Record<string, unknown>)?.c as number) || 0;
+        const injC =
+          ((recentInjections as Record<string, unknown>)?.c as number) || 0;
+
+        const actions: string[] = [];
+        const byTrigger = Object.fromEntries(
+          (pending.results || []).map((r) => {
+            const row = r as Record<string, unknown>;
+            return [row.trigger, row.c];
+          }),
+        );
+
+        if (byTrigger.skill_candidate)
+          actions.push(
+            `🛠  ${byTrigger.skill_candidate} memory(ies) look procedural — promote with save_skill so they auto-load next time.`,
+          );
+        if (byTrigger.contradiction)
+          actions.push(
+            `⚠️  ${byTrigger.contradiction} contradiction(s) pending — review with list_reflections then link_memories with relation 'supersedes' or 'contradicts'.`,
+          );
+        if (staleC > 0)
+          actions.push(
+            `🗓  ${staleC} memory(ies) not verified in 6+ months — re-confirm or mark superseded.`,
+          );
+        if (lowC > 0)
+          actions.push(
+            `🤔 ${lowC} memory(ies) with confidence < 0.5 — verify or delete.`,
+          );
+        if (contraC > 0)
+          actions.push(
+            `🔀 ${contraC} contradiction link(s) in graph — resolve so the hub picks one truth.`,
+          );
+        if ((failingSkills.results || []).length)
+          actions.push(
+            `💔 ${(failingSkills.results || []).length} skill(s) failing more than succeeding — refine procedures.`,
+          );
+        if (injC > 0)
+          actions.push(
+            `🛡  ${injC} injection scan hit(s) in last 7 days — audit with raw query on injection_log.`,
+          );
+        if (!actions.length) actions.push("✅ Hub is clean. No action needed.");
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `# Hub Health\n\n${actions.map((a) => `- ${a}`).join("\n")}\n\n## Counts\n- Pending reflections: ${Object.values(byTrigger).reduce((a: number, b) => a + (b as number), 0)}\n- Stale memories: ${staleC}\n- Low-confidence memories: ${lowC}\n- Contradiction links: ${contraC}\n- Failing skills: ${(failingSkills.results || []).length}\n- Injection hits (7d): ${injC}`,
+            },
+          ],
+        };
+      },
+    );
+
+    // ── VERIFY MEMORY (decay reset) ─────────────────────────────
+
+    this.server.tool(
+      "verify_memory",
+      `Confirm a memory is still true. Resets verified_at, bumps confidence. Use when the user re-asserts a fact, or when an agent checks a stale memory and finds it accurate.`,
+      {
+        id: z.number(),
+        confidence_delta: z.number().default(0.1),
+      },
+      async ({ id, confidence_delta }) => {
+        const db = this.env.DB;
+        await db
+          .prepare(
+            `UPDATE memories SET verified_at = datetime('now'), confidence = MIN(1.0, confidence + ?) WHERE id = ?`,
+          )
+          .bind(confidence_delta, id)
+          .run();
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Memory ${id} re-verified. Confidence bumped by ${confidence_delta}.`,
+            },
+          ],
+        };
+      },
+    );
   }
 }
 
@@ -1992,7 +2841,7 @@ export default {
       return new Response(
         JSON.stringify({
           name: "Context Hub",
-          version: "0.1.0",
+          version: "0.2.0",
           status: "ok",
           endpoints: ["/mcp"],
         }),

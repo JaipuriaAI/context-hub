@@ -6,7 +6,9 @@ Stop repeating yourself across AI tools. Context Hub is a shared MCP server that
 
 **Built on Cloudflare Workers (free tier). Costs $0/month. Always on. No cold starts.**
 
-> **New in 0.2.0:** Context Hub now works with **any MCP client**, not just Claude. When you save a memory or log context from ChatGPT, Perplexity, Cursor, Windsurf, Zed, or a custom agent system, the `source` field is auto-detected from the MCP client's self-reported name — so you can always see where each memory came from.
+> **New in 0.2.0 — the self-evolving layer.** Context Hub now learns _how_ you work, not just _what_ you know. Hermes-style **procedural memory** (skills), LLM Wiki-style **typed memory graph** (supersedes / contradicts / refines), **confidence + decay** on every memory, **hot/warm/cold tiers** that auto-promote frequently-used facts, an **injection scanner** on all writes, and a **nudge layer** that appends `💡 hub_suggestion` to tool responses so your agent passively keeps the hub clean. **Zero breaking changes** — every existing tool still works exactly as before.
+>
+> **0.1.0:** Context Hub works with **any MCP client**, not just Claude. When you save a memory or log context from ChatGPT, Perplexity, Cursor, Windsurf, Zed, or a custom agent system, the `source` field is auto-detected from the MCP client's self-reported name — so you can always see where each memory came from.
 
 ---
 
@@ -328,7 +330,48 @@ This calls `list_all_data` and returns the complete inventory across all tables.
 
 ---
 
-## MCP Tools Reference (24 tools)
+## What's new in 0.2 — the self-evolving layer
+
+Context Hub 0.1 was a memory store. 0.2 is a **memory store that improves itself the more you use it**. The model is borrowed from Nous Research's Hermes Agent (procedural memory) and Karpathy's LLM Wiki pattern (typed link graph), adapted to run inside the MCP server so any client benefits without extra setup.
+
+### What it adds
+
+| Capability                 | What it means                                                                                                                   |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| **Procedural memory**      | New `skills` table — save reusable markdown procedures with trigger patterns. Next similar task auto-loads the skill.           |
+| **Typed memory graph**     | New `memory_links` table — `supersedes` / `contradicts` / `supports` / `related` / `example_of` / `refines` edges between rows. |
+| **Confidence + decay**     | Every memory has a `confidence` score (0–1) and `verified_at` timestamp. Stale or low-confidence memories surface in health.    |
+| **Hot/warm/cold tiers**    | `access_count` is bumped on retrieval. Memories hit 5+ times auto-promote to `hot`. Superseded memories drop to `cold`.         |
+| **Contradiction sensor**   | At write time, if a new memory is 30–60% similar to an old one and uses opposing signal words, a `reflection` is recorded.      |
+| **Skill-candidate sensor** | `learning` or `decision` memories containing procedural markers (`first`, `then`, `step N`) auto-flag for skill promotion.      |
+| **Reflections queue**      | Internal to-do list of hygiene actions. Status: `pending` → `applied`/`dismissed`.                                              |
+| **Injection scanner**      | 8 prompt-injection rules run on every write surface. High severity blocks the write; medium/low flag it. All hits logged.       |
+| **Nudge layer**            | Every save/search response now ends with a `💡 hub_suggestion` block summarising the top 3 pending reflections.                 |
+
+### How it nudges you (without changing any old tool's contract)
+
+The "force" mechanic is intentionally indirect. The LLM client reads its own tool responses — so when the response includes:
+
+```
+💡 hub_suggestion:
+• [contradiction] New memory may contradict memory #18. Old: "use npm" — New: "always use pnpm"
+  → Call resolve_reflection with id=7 after acting.
+```
+
+…Claude/ChatGPT/Cursor surface it to you in natural language ("Heads up — this seems to contradict an older memory. Supersede the old one?"). You don't see the raw block; you see the agent acting on it. Over weeks of normal usage, contradictions get resolved, stale facts get verified, recurring workflows get promoted to skills.
+
+### How to upgrade your existing hub
+
+```bash
+cd your-scaffolded-hub
+npx create-context-hub@latest update
+```
+
+The CLI auto-applies the additive 0002 migration to your remote D1 (with confirmation). See the [Upgrading section below](#upgrading-a-project-scaffolded-via-npx-create-context-hub) for details. **Your existing memories are preserved.**
+
+---
+
+## MCP Tools Reference (34 tools)
 
 ### Memories (5 tools)
 
@@ -398,6 +441,31 @@ This calls `list_all_data` and returns the complete inventory across all tables.
 | Tool            | What It Does                                       | Smart Behavior                                                   |
 | --------------- | -------------------------------------------------- | ---------------------------------------------------------------- |
 | `get_hub_stats` | Dashboard metrics: counts, activity, storage, tags | Instructs Claude to render as a colorful inline visual dashboard |
+
+### Skills — procedural memory (4 tools, new in 0.2)
+
+| Tool                   | What It Does                                                                   | Smart Behavior                                                                                   |
+| ---------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| `save_skill`           | Save a markdown procedure with trigger pattern. Versioned with parent lineage. | Upserts by name. Each rewrite bumps `version` and links `parent_skill_id` for traceable history. |
+| `get_skill`            | Load a skill by name or by FTS5 trigger match                                  | Before a recurring task, search skills first — follow the saved procedure if one matches.        |
+| `list_skills`          | List skills ranked by success rate                                             | Audit your skill library; spot ones with high failure-to-success ratios.                         |
+| `record_skill_outcome` | Track whether a skill worked                                                   | After running a skill. Auto-records a `skill_failed` reflection if failure rate exceeds 50%.     |
+
+### Graph + reflections (4 tools, new in 0.2)
+
+| Tool                 | What It Does                                      | Smart Behavior                                                                                                                                 |
+| -------------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `link_memories`      | Create a typed edge between two memories          | Relations: `supersedes`, `contradicts`, `supports`, `related`, `example_of`, `refines`. `supersedes` auto-drops the old memory to `cold` tier. |
+| `get_memory_graph`   | Show a memory + all its incoming + outgoing links | Use to understand the cluster of facts surrounding any single memory.                                                                          |
+| `list_reflections`   | Inspect the self-improvement queue                | Filter by status (`pending`/`applied`/`dismissed`). Pending items are the hub's housekeeping to-do list.                                       |
+| `resolve_reflection` | Mark a reflection as applied or dismissed         | Call after you (or the user) acted on a suggestion the hub raised.                                                                             |
+
+### Health + verification (2 tools, new in 0.2)
+
+| Tool             | What It Does                                                                               | Smart Behavior                                                                                 |
+| ---------------- | ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
+| `get_hub_health` | Prioritized action list across stale facts, contradictions, failing skills, injection hits | Call alongside `get_full_context` at session start so the agent knows what hygiene to suggest. |
+| `verify_memory`  | Re-confirm a memory is still true; bumps confidence, resets verified_at                    | Call when the user re-asserts an old fact or you've verified it against current code/reality.  |
 
 ---
 
@@ -488,9 +556,24 @@ The `update` command:
 - Previews which files will change and by how many lines
 - Writes `.bak` backups before overwriting (so rollback is one `mv` away)
 - Preserves your `wrangler.json` (with your database ID), `package.json`, `tsconfig.json`, and any custom files
+- **Auto-applies the 0.2 self-evolving migration to your remote D1** — probes your DB for the `confidence` column first; if absent, runs `0002_self_evolving.sql` after asking for confirmation
 - Optionally runs `npx wrangler deploy` for you
 
-Existing memories keep their original `source` values — there's no data migration. New memories written after the upgrade get the calling MCP client's self-reported name as their source (e.g. `claude-code`, `chatgpt`, `perplexity`, `cursor`).
+**Your existing memories are preserved.** The 0.2 migration is purely additive:
+
+- `ALTER TABLE memories ADD COLUMN` for `confidence` (default 0.8), `verified_at` (NULL), `superseded_by` (NULL), `tier` (default 'warm'), `access_count` (default 0), `last_accessed_at` (NULL)
+- `CREATE TABLE IF NOT EXISTS` for `skills`, `memory_links`, `reflections`, `injection_log`
+- Zero data is dropped, modified, or migrated. Every existing row keeps its original content, category, tags, and source.
+
+If you'd rather run the migration manually (or the CLI couldn't reach your D1):
+
+```bash
+npm run db:upgrade
+# or:
+npx wrangler d1 execute YOUR_DB_NAME --remote --file=./migrations/0002_self_evolving.sql
+```
+
+The migration is idempotent for the new tables (`CREATE TABLE IF NOT EXISTS`). The `ALTER TABLE ADD COLUMN` statements will fail with "duplicate column" if you re-run after a successful migration — that's safe and means your schema is already on 0.2.
 
 ### Forgot where your scaffolded hub lives?
 
@@ -526,7 +609,11 @@ If that turns up nothing, the Worker name in your [Cloudflare Workers dashboard]
 -- memories: things the AI learns about you
 -- `source` is auto-detected from the MCP client's clientInfo.name
 -- (claude-code, claude-ai, claude-app, chatgpt, perplexity, cursor, windsurf, zed, custom agents, etc.)
-memories (id, content, category, tags, source, created_at, updated_at)
+-- 0.2 added: confidence, verified_at, superseded_by, tier, access_count, last_accessed_at
+memories (
+  id, content, category, tags, source, created_at, updated_at,
+  confidence, verified_at, superseded_by, tier, access_count, last_accessed_at
+)
 -- FTS5 full-text search index on memories
 
 -- projects: workspace-level context
@@ -540,6 +627,35 @@ identity (id, key UNIQUE, value, created_at, updated_at)
 
 -- context_log: cross-client breadcrumbs (source auto-detected from MCP client)
 context_log (id, source, summary, project_name, created_at)
+```
+
+### Schema of 0.2 self-evolving tables (new)
+
+```sql
+-- memory_links: typed graph between memories
+-- relation: supersedes | contradicts | supports | related | example_of | refines
+memory_links (id, from_id, to_id, relation, confidence, note, created_at)
+
+-- skills: reusable markdown procedures (procedural memory)
+skills (
+  id, name UNIQUE, trigger_pattern, procedure,
+  success_count, failure_count, last_used_at,
+  version, parent_skill_id, source, tags, active, created_at, updated_at
+)
+-- FTS5 full-text search index on skills
+
+-- reflections: self-improvement queue
+-- trigger: contradiction | stale_fact | skill_candidate | skill_failed | duplicate_cluster | low_confidence
+reflections (
+  id, trigger, observation, proposed_change, related_ids,
+  status, created_at, resolved_at
+)
+
+-- injection_log: security audit trail
+injection_log (
+  id, source, surface, content_preview,
+  patterns_matched, severity, action_taken, created_at
+)
 ```
 
 ---
